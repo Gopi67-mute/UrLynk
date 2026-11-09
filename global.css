@@ -1,0 +1,228 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+@import "nativewind/theme";
+
+/*
+ * UrLynk design tokens for Tailwind 4 / NativeWind 5.
+ *
+ * This file serves className utilities. src/theme/ holds the same values for
+ * props that cannot take a class (ActivityIndicator color, StyleSheet, native
+ * gradients). Change a value in both places.
+ */
+@theme {
+  /* Remove Tailwind's defaults so only UrLynk tokens generate utilities. */
+  --color-*: initial;
+  --font-*: initial;
+  --font-weight-*: initial;
+  --text-*: initial;
+  --leading-*: initial;
+  --radius-*: initial;
+
+  /* Brand colors */
+  --color-brand-violet: #6c3aed;
+  --color-brand-purple: #8b5cf6;
+  --color-brand-green: #10b981;
+  --color-brand-blue: #3b82f6;
+
+  /* Semantic colors */
+  --color-success: #22c55e;
+  --color-info: var(--color-brand-blue);
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-secondary: var(--color-brand-purple);
+
+  /* Status message backgrounds, paired with Gray 900 text */
+  --color-success-tint: #ecfdf5;
+  --color-info-tint: #eff6ff;
+  --color-warning-tint: #fffbeb;
+  --color-error-tint: #fef2f2;
+
+  /* Neutral colors */
+  --color-white: #ffffff;
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #f1f5f9;
+  --color-gray-200: #e2e8f0;
+  --color-gray-300: #cbd5e1;
+  --color-gray-600: #475569;
+  --color-gray-900: #0f172a;
+
+  /* UI interaction colors */
+  --color-primary: var(--color-brand-violet);
+  --color-primary-pressed: #5b21b6;
+  --color-primary-light: #ede9fe;
+
+  /* UI surface, text and control roles */
+  --color-screen: var(--color-gray-50);
+  --color-surface: var(--color-white);
+  --color-text-primary: var(--color-gray-900);
+  --color-text-secondary: var(--color-gray-600);
+  --color-border: var(--color-gray-200);
+  --color-border-strong: var(--color-gray-300);
+  --color-input-background: var(--color-white);
+  --color-input-border: var(--color-gray-300);
+  --color-focus: var(--color-primary);
+  --color-disabled-background: var(--color-gray-100);
+  --color-disabled-foreground: var(--color-gray-600);
+  --color-overlay: var(--color-gray-900);
+  --color-icon: var(--color-gray-600);
+  --color-icon-active: var(--color-primary);
+
+  /* Gradient-only stops; not part of the general palette */
+  --gradient-green-end: #06b6d4;
+  --gradient-blue-end: #6366f1;
+
+  /*
+   * Typography: Inter families, registered by useFonts in src/app/_layout.tsx.
+   * Each weight is its own family. Android alters a loaded face when fontWeight
+   * is also set, so font-bold selects Inter-Bold rather than a numeric weight.
+   */
+  --font-regular: "Inter-Regular";
+  --font-medium: "Inter-Medium";
+  --font-semibold: "Inter-SemiBold";
+  --font-bold: "Inter-Bold";
+  --default-font-family: var(--font-regular);
+
+  /* Font weights each family provides */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Font sizes */
+  --type-size-h1: 32px;
+  --type-size-h2: 24px;
+  --type-size-h3: 20px;
+  --type-size-h4: 16px;
+  --type-size-body-lg: 16px;
+  --type-size-body-md: 14px;
+  --type-size-body-sm: 12px;
+  --type-size-caption: 11px;
+
+  /* Line heights, in px because React Native needs absolute values */
+  --type-leading-h1: 38.4px; /* 1.2 */
+  --type-leading-h2: 31.2px; /* 1.3 */
+  --type-leading-h3: 26px; /* 1.3 */
+  --type-leading-h4: 22.4px; /* 1.4 */
+  --type-leading-body-lg: 25.6px; /* 1.6 */
+  --type-leading-body-md: 22.4px; /* 1.6 */
+  --type-leading-body-sm: 19.2px; /* 1.6 */
+  --type-leading-caption: 15.4px; /* 1.4 */
+
+  /* Reusable visual tokens */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-base: 16px;
+  --spacing-lg: 20px;
+  --spacing-xl: 24px;
+  --spacing-xxl: 32px;
+  --spacing-xxxl: 40px;
+  --spacing-section: 48px;
+}
+
+/* Text styles: family, size and line height applied together. */
+@utility type-h1 {
+  font-family: var(--font-bold);
+  font-size: var(--type-size-h1);
+  line-height: var(--type-leading-h1);
+}
+
+@utility type-h2 {
+  font-family: var(--font-semibold);
+  font-size: var(--type-size-h2);
+  line-height: var(--type-leading-h2);
+}
+
+@utility type-h3 {
+  font-family: var(--font-semibold);
+  font-size: var(--type-size-h3);
+  line-height: var(--type-leading-h3);
+}
+
+@utility type-h4 {
+  font-family: var(--font-medium);
+  font-size: var(--type-size-h4);
+  line-height: var(--type-leading-h4);
+}
+
+@utility type-body-lg {
+  font-family: var(--font-regular);
+  font-size: var(--type-size-body-lg);
+  line-height: var(--type-leading-body-lg);
+}
+
+@utility type-body-md {
+  font-family: var(--font-regular);
+  font-size: var(--type-size-body-md);
+  line-height: var(--type-leading-body-md);
+}
+
+@utility type-body-sm {
+  font-family: var(--font-regular);
+  font-size: var(--type-size-body-sm);
+  line-height: var(--type-leading-body-sm);
+}
+
+@utility type-caption {
+  font-family: var(--font-regular);
+  font-size: var(--type-size-caption);
+  line-height: var(--type-leading-caption);
+}
+
+/* Component roles, built from the scale above. */
+@utility type-button {
+  font-family: var(--font-medium);
+  font-size: var(--type-size-h4);
+  line-height: var(--type-leading-h4);
+}
+
+@utility type-input-label {
+  font-family: var(--font-medium);
+  font-size: var(--type-size-body-md);
+  line-height: var(--type-leading-body-md);
+}
+
+@utility type-nav-label {
+  font-family: var(--font-medium);
+  font-size: var(--type-size-body-sm);
+  line-height: var(--type-leading-body-sm);
+}
+
+/* Android TextInput clips or shifts text when a line height is set. */
+@utility type-input {
+  font-family: var(--font-regular);
+  font-size: var(--type-size-body-lg);
+}
+
+/* Gradients: use selectively for primary actions and brand highlights. */
+@utility gradient-primary {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-brand-violet),
+    var(--color-brand-purple)
+  );
+}
+
+@utility gradient-green {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-brand-green),
+    var(--gradient-green-end)
+  );
+}
+
+@utility gradient-blue {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-brand-blue),
+    var(--gradient-blue-end)
+  );
+}
