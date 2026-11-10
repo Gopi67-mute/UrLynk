@@ -25,6 +25,8 @@
   --color-brand-purple: #8b5cf6;
   --color-brand-green: #10b981;
   --color-brand-blue: #3b82f6;
+  --color-brand-urlynk-blue: #1e40af;
+  --color-brand-indigo: #4f46e5;
 
   /* Semantic colors */
   --color-success: #22c55e;
@@ -224,5 +226,13 @@
     90deg,
     var(--color-brand-blue),
     var(--gradient-blue-end)
+  );
+}
+
+@utility gradient-blue-purple {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-brand-urlynk-blue),
+    var(--color-brand-purple)
   );
 }
