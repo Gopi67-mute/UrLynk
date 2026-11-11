@@ -16,9 +16,10 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
-  AuthNotConnectedError,
+  type AuthFailure,
   type AuthMode,
-  continueWithEmail,
+  type SocialProvider,
+  useAuthClient,
 } from "@/auth/authClient";
 import {
   colors,
@@ -56,6 +57,7 @@ const FORM_HEIGHT =
   spacing.md;
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const CODE_LENGTH = 6;
 
 const MODE_CONTENT: Record<
   AuthMode,
@@ -64,7 +66,6 @@ const MODE_CONTENT: Record<
     switchPrompt: string;
     switchLabel: string;
     switchesTo: AuthMode;
-    notConnected: string;
   }
 > = {
   signUp: {
@@ -72,18 +73,18 @@ const MODE_CONTENT: Record<
     switchPrompt: "Already have an account?",
     switchLabel: "Log in",
     switchesTo: "signIn",
-    notConnected: "Email sign-up isn't connected yet.",
   },
   signIn: {
     heading: "Welcome Back",
     switchPrompt: "Don't have an account?",
     switchLabel: "Sign up",
     switchesTo: "signUp",
-    notConnected: "Email log in isn't connected yet.",
   },
 };
 
 type FormNotice = { tone: "info" | "error"; text: string };
+type AuthStep = "email" | "code";
+type PendingAction = "submit" | "resend" | SocialProvider;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -97,25 +98,39 @@ function getEmailError(email: string) {
   return null;
 }
 
+function getCodeError(code: string) {
+  if (code.length !== CODE_LENGTH) {
+    return `Enter the ${CODE_LENGTH}-digit code from your email.`;
+  }
+  return null;
+}
+
 export default function Auth() {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const authClient = useAuthClient();
 
   const [mode, setMode] = useState<AuthMode>("signUp");
+  const [step, setStep] = useState<AuthStep>("email");
   const [email, setEmail] = useState("");
-  const [emailError, setEmailError] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [fieldError, setFieldError] = useState<string | null>(null);
   const [notice, setNotice] = useState<FormNotice | null>(null);
-  const [isEmailFocused, setIsEmailFocused] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isFieldFocused, setIsFieldFocused] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
 
   // State updates land after the next render, too late to stop a double tap.
-  const submitInFlight = useRef(false);
+  const actionInFlight = useRef(false);
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  const emailHasFocus = useRef(false);
+  const fieldHasFocus = useRef(false);
   const formOffset = useRef(0);
   const viewportHeight = useRef(0);
 
   const content = MODE_CONTENT[mode];
+  const isCodeStep = step === "code";
+  const isBusy = pendingAction !== null;
+  const isSubmitting = pendingAction === "submit";
+  const primaryLabel = isCodeStep ? "Verify" : "Continue with Email";
 
   const logoWidth = width * LOGO_SCREEN_WIDTH_RATIO;
   const logoHeight = logoWidth / LOGO_ASPECT_RATIO;
@@ -159,71 +174,139 @@ export default function Auth() {
     const previousHeight = viewportHeight.current;
     viewportHeight.current = nextHeight;
 
-    if (nextHeight < previousHeight && emailHasFocus.current) {
+    if (nextHeight < previousHeight && fieldHasFocus.current) {
       revealForm();
     } else if (previousHeight > 0 && nextHeight > previousHeight) {
       scrollRef.current?.scrollTo({ y: 0, animated: true });
     }
   }
 
-  function handleEmailChange(value: string) {
+  function handleFieldChange(value: string) {
+    setFieldError(null);
+    if (isCodeStep) {
+      setCode(value.replace(/\D/g, ""));
+      return;
+    }
     setEmail(value);
-    setEmailError(null);
     setNotice(null);
   }
 
-  function handleEmailFocus() {
-    emailHasFocus.current = true;
-    setIsEmailFocused(true);
+  function handleFieldFocus() {
+    fieldHasFocus.current = true;
+    setIsFieldFocused(true);
   }
 
-  function handleEmailBlur() {
-    emailHasFocus.current = false;
-    setIsEmailFocused(false);
+  function handleFieldBlur() {
+    fieldHasFocus.current = false;
+    setIsFieldFocused(false);
   }
 
   function handleSwitchMode() {
     setMode(content.switchesTo);
-    setEmailError(null);
+    setFieldError(null);
     setNotice(null);
   }
 
-  async function handleContinue() {
-    if (submitInFlight.current) return;
+  function showFailure(result: AuthFailure) {
+    if (result.isFieldError) setFieldError(result.message);
+    else setNotice({ tone: "error", text: result.message });
+  }
 
-    const trimmedEmail = email.trim();
-    const validationError = getEmailError(trimmedEmail);
-    setEmailError(validationError);
-    setNotice(null);
-    if (validationError) return;
+  async function runAction(action: PendingAction, task: () => Promise<void>) {
+    if (actionInFlight.current) return;
 
-    submitInFlight.current = true;
-    setIsSubmitting(true);
+    actionInFlight.current = true;
+    setPendingAction(action);
     try {
-      await continueWithEmail(mode, trimmedEmail);
-    } catch (error) {
-      if (error instanceof AuthNotConnectedError) {
-        setNotice({ tone: "info", text: content.notConnected });
-      } else {
-        console.error("[auth] Email authentication failed:", error);
-        setNotice({
-          tone: "error",
-          text: "We couldn't continue right now. Please try again.",
-        });
-      }
+      await task();
     } finally {
-      submitInFlight.current = false;
-      setIsSubmitting(false);
+      actionInFlight.current = false;
+      setPendingAction(null);
     }
   }
 
-  const message: FormNotice | null = emailError
-    ? { tone: "error", text: emailError }
+  async function submitEmail() {
+    const trimmedEmail = email.trim();
+    const validationError = getEmailError(trimmedEmail);
+    setFieldError(validationError);
+    setNotice(null);
+    if (validationError) return;
+
+    await runAction("submit", async () => {
+      const result = await authClient.sendEmailCode(mode, trimmedEmail);
+      if (!result.ok) {
+        showFailure(result);
+        return;
+      }
+      setCode("");
+      setStep("code");
+      setNotice({ tone: "info", text: `We sent a code to ${trimmedEmail}.` });
+    });
+  }
+
+  async function submitCode() {
+    const validationError = getCodeError(code);
+    setFieldError(validationError);
+    if (validationError) return;
+
+    await runAction("submit", async () => {
+      const result = await authClient.verifyEmailCode(mode, code);
+      if (!result.ok) showFailure(result);
+    });
+  }
+
+  function handleContinue() {
+    return isCodeStep ? submitCode() : submitEmail();
+  }
+
+  async function handleResendCode() {
+    await runAction("resend", async () => {
+      setFieldError(null);
+      const result = await authClient.resendEmailCode(mode);
+      if (!result.ok) {
+        showFailure(result);
+        return;
+      }
+      setCode("");
+      setNotice({
+        tone: "info",
+        text: `We sent a new code to ${email.trim()}.`,
+      });
+    });
+  }
+
+  function showEmailStep() {
+    fieldHasFocus.current = false;
+    setIsFieldFocused(false);
+    setStep("email");
+    setCode("");
+    setFieldError(null);
+    setNotice(null);
+  }
+
+  function handleChangeEmail() {
+    if (actionInFlight.current) return;
+
+    showEmailStep();
+    void authClient.cancelEmailAttempt(mode);
+  }
+
+  async function handleSocial(provider: SocialProvider) {
+    await runAction(provider, async () => {
+      // A social attempt replaces any email attempt still waiting for a code.
+      showEmailStep();
+      const result = await authClient.continueWithSocial(provider);
+      if (!result.ok) showFailure(result);
+    });
+  }
+
+  const message: FormNotice | null = fieldError
+    ? { tone: "error", text: fieldError }
     : notice;
 
   let inputBorderColor = `${colors.brand.purple}66`;
-  if (emailError) inputBorderColor = componentTokens.input.errorBorder;
-  else if (isEmailFocused) inputBorderColor = componentTokens.input.focusedBorder;
+  if (fieldError) inputBorderColor = componentTokens.input.errorBorder;
+  else if (isFieldFocused) inputBorderColor = componentTokens.input.focusedBorder;
 
   return (
     <View style={styles.screen}>
@@ -312,27 +395,36 @@ export default function Auth() {
                 resizeMode="contain"
                 fadeDuration={0}
               />
+              {/* Remounted per step, as Android ignores keyboard changes on a live field. */}
               <TextInput
-                value={email}
-                onChangeText={handleEmailChange}
-                onFocus={handleEmailFocus}
-                onBlur={handleEmailBlur}
+                key={step}
+                value={isCodeStep ? code : email}
+                onChangeText={handleFieldChange}
+                onFocus={handleFieldFocus}
+                onBlur={handleFieldBlur}
                 onSubmitEditing={handleContinue}
-                editable={!isSubmitting}
-                placeholder="Enter your email address"
+                editable={!isBusy}
+                autoFocus={isCodeStep}
+                placeholder={
+                  isCodeStep
+                    ? `Enter ${CODE_LENGTH}-digit code`
+                    : "Enter your email address"
+                }
                 placeholderTextColor={componentTokens.input.placeholder}
-                keyboardType="email-address"
-                inputMode="email"
+                keyboardType={isCodeStep ? "number-pad" : "email-address"}
+                inputMode={isCodeStep ? "numeric" : "email"}
                 autoCapitalize="none"
                 autoCorrect={false}
-                autoComplete="email"
-                textContentType="emailAddress"
+                autoComplete={isCodeStep ? "one-time-code" : "email"}
+                textContentType={isCodeStep ? "oneTimeCode" : "emailAddress"}
                 returnKeyType="go"
-                maxLength={254}
+                maxLength={isCodeStep ? CODE_LENGTH : 254}
                 maxFontSizeMultiplier={1.3}
                 cursorColor={colors.interaction.primary}
                 selectionColor={`${colors.brand.purple}66`}
-                accessibilityLabel="Email address"
+                accessibilityLabel={
+                  isCodeStep ? "Verification code" : "Email address"
+                }
                 style={styles.emailInput}
               />
             </View>
@@ -344,9 +436,9 @@ export default function Auth() {
             <TouchableOpacity
               activeOpacity={0.85}
               accessibilityRole="button"
-              accessibilityLabel="Continue with Email"
-              accessibilityState={{ busy: isSubmitting, disabled: isSubmitting }}
-              disabled={isSubmitting}
+              accessibilityLabel={primaryLabel}
+              accessibilityState={{ busy: isSubmitting, disabled: isBusy }}
+              disabled={isBusy}
               onPress={handleContinue}
               style={[styles.primaryButton, isSubmitting && styles.busyButton]}
             >
@@ -354,7 +446,7 @@ export default function Auth() {
                 <ActivityIndicator color={colors.neutral.white} />
               ) : (
                 <Text maxFontSizeMultiplier={1.3} style={styles.primaryLabel}>
-                  Continue with Email →
+                  {primaryLabel} →
                 </Text>
               )}
             </TouchableOpacity>
@@ -368,32 +460,55 @@ export default function Auth() {
             </View>
 
             <View style={styles.socialButtons}>
-              <PendingSocialButton
+              <SocialButton
                 label="Continue with Google"
                 icon={require("../../assets/images/auth-icon-google.png")}
+                disabled={isBusy}
+                isLoading={pendingAction === "google"}
+                onPress={() => handleSocial("google")}
               />
-              <PendingSocialButton
+              <SocialButton
                 label="Continue with Facebook"
                 icon={require("../../assets/images/auth-icon-facebook.png")}
+                disabled={isBusy}
+                isLoading={pendingAction === "facebook"}
+                onPress={() => handleSocial("facebook")}
               />
             </View>
+
+            {/* Clerk's bot protection attaches here during sign-up. */}
+            <View nativeID="clerk-captcha" />
           </View>
 
           <View style={styles.footer}>
-            <Text maxFontSizeMultiplier={1.3} style={styles.switchPrompt}>
-              {content.switchPrompt}
-            </Text>
-            <TouchableOpacity
-              activeOpacity={0.6}
-              accessibilityRole="button"
-              disabled={isSubmitting}
-              onPress={handleSwitchMode}
-              hitSlop={spacing.md}
-            >
-              <Text maxFontSizeMultiplier={1.3} style={styles.switchLabel}>
-                {content.switchLabel}
-              </Text>
-            </TouchableOpacity>
+            {isCodeStep ? (
+              <>
+                <FooterLink
+                  label={pendingAction === "resend" ? "Sending…" : "Resend code"}
+                  disabled={isBusy}
+                  onPress={handleResendCode}
+                />
+                <Text maxFontSizeMultiplier={1.3} style={styles.switchPrompt}>
+                  ·
+                </Text>
+                <FooterLink
+                  label="Change email"
+                  disabled={isBusy}
+                  onPress={handleChangeEmail}
+                />
+              </>
+            ) : (
+              <>
+                <Text maxFontSizeMultiplier={1.3} style={styles.switchPrompt}>
+                  {content.switchPrompt}
+                </Text>
+                <FooterLink
+                  label={content.switchLabel}
+                  disabled={isBusy}
+                  onPress={handleSwitchMode}
+                />
+              </>
+            )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -418,28 +533,64 @@ function FormMessage({ notice }: { notice: FormNotice }) {
   );
 }
 
-/** Deliberately inert until Google and Facebook are connected through Clerk. */
-function PendingSocialButton({
+function FooterLink({
+  label,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.6}
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      hitSlop={spacing.md}
+    >
+      <Text maxFontSizeMultiplier={1.3} style={styles.switchLabel}>
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+function SocialButton({
   label,
   icon,
+  disabled,
+  isLoading,
+  onPress,
 }: {
   label: string;
   icon: ImageSourcePropType;
+  disabled: boolean;
+  isLoading: boolean;
+  onPress: () => void;
 }) {
   return (
-    <View
-      accessible
+    <TouchableOpacity
+      activeOpacity={0.85}
       accessibilityRole="button"
-      accessibilityLabel={`${label}, not available yet`}
-      accessibilityState={{ disabled: true }}
+      accessibilityLabel={label}
+      accessibilityState={{ busy: isLoading, disabled }}
+      disabled={disabled}
+      onPress={onPress}
       style={styles.socialButton}
     >
-      <Image
-        source={icon}
-        style={styles.socialIcon}
-        resizeMode="contain"
-        fadeDuration={0}
-      />
+      {isLoading ? (
+        <ActivityIndicator style={styles.socialIcon} color={colors.brand.indigo} />
+      ) : (
+        <Image
+          source={icon}
+          style={styles.socialIcon}
+          resizeMode="contain"
+          fadeDuration={0}
+        />
+      )}
       <Text
         numberOfLines={1}
         maxFontSizeMultiplier={1.2}
@@ -447,12 +598,7 @@ function PendingSocialButton({
       >
         {label}
       </Text>
-      <View style={styles.soonChip}>
-        <Text allowFontScaling={false} style={styles.soonLabel}>
-          Soon
-        </Text>
-      </View>
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -633,24 +779,10 @@ const styles = StyleSheet.create({
     left: spacing.lg,
     width: spacing.xl,
     height: spacing.xl,
-    opacity: 0.55,
   },
   socialLabel: {
     ...typography.inputLabel,
-    color: colors.ui.textSecondary,
-  },
-  soonChip: {
-    position: "absolute",
-    right: spacing.md,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.pill,
-    backgroundColor: colors.interaction.primaryLight,
-  },
-  soonLabel: {
-    ...typography.caption,
-    fontFamily: fontFamily.medium,
-    color: colors.interaction.primaryPressed,
+    color: colors.ui.textPrimary,
   },
   footer: {
     minHeight: FOOTER_HEIGHT,
