@@ -4,6 +4,8 @@ const brand = {
   purple: "#8B5CF6",
   green: "#10B981",
   blue: "#3B82F6",
+  urlynkBlue: "#1E40AF",
+  indigo: "#4F46E5",
 } as const;
 
 const semantic = {
