@@ -1,12 +1,13 @@
 import "../../global.css";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { ClerkProvider, useAuth } from "@clerk/expo";
 import { tokenCache } from "@clerk/expo/token-cache";
 import { useFonts } from "expo-font";
 import * as SplashScreen from "expo-splash-screen";
 import { Stack } from "expo-router";
 import materialSymbols from "expo-symbols/androidWeights/regular";
+import { QueryProvider } from "@/query/query-provider";
 import { colors } from "@/theme/colors";
 
 // If this fails the splash simply auto-hides, so it is safe to continue.
@@ -65,7 +66,13 @@ function RootNavigator({ fontsReady }: { fontsReady: boolean }) {
           backgroundColor: colors.ui.screen,
         }}
       >
-        <ActivityIndicator size="large" color={colors.interaction.primary} />
+        {authLoadTimedOut && !isLoaded ? (
+          <Text style={{ color: colors.ui.textSecondary }}>
+            Still connecting. Check your internet connection.
+          </Text>
+        ) : (
+          <ActivityIndicator size="large" color={colors.interaction.primary} />
+        )}
       </View>
     );
   }
@@ -74,10 +81,46 @@ function RootNavigator({ fontsReady }: { fontsReady: boolean }) {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Protected guard={Boolean(isSignedIn)}>
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen
+          name="members/new"
+          options={{
+            headerShown: true,
+            title: "Add Member",
+            headerTintColor: colors.ui.textPrimary,
+            headerStyle: { backgroundColor: colors.ui.surface },
+          }}
+        />
+        {/* A literal segment, so it is matched before members/[id] rather than read
+            as a member ID. The member to edit comes from the `id` search parameter. */}
+        <Stack.Screen
+          name="members/edit"
+          options={{
+            headerShown: true,
+            title: "Edit Profile",
+            headerTintColor: colors.ui.textPrimary,
+            headerStyle: { backgroundColor: colors.ui.surface },
+          }}
+        />
+        <Stack.Screen
+          name="members/[id]"
+          options={{
+            headerShown: true,
+            title: "Member",
+            headerTintColor: colors.ui.textPrimary,
+            headerStyle: { backgroundColor: colors.ui.surface },
+          }}
+        />
       </Stack.Protected>
       <Stack.Protected guard={!isSignedIn}>
         <Stack.Screen name="onboarding" />
         <Stack.Screen name="auth" />
+      </Stack.Protected>
+      {/* TEMPORARY Phase 4 check (src/app/dev-api-check.tsx): debug builds, signed in only. */}
+      <Stack.Protected guard={Boolean(isSignedIn) && __DEV__}>
+        <Stack.Screen
+          name="dev-api-check"
+          options={{ headerShown: true, title: "API check (dev only)" }}
+        />
       </Stack.Protected>
     </Stack>
   );
@@ -121,7 +164,9 @@ export default function RootLayout() {
 
   return (
     <ClerkProvider publishableKey={publishableKey!} tokenCache={tokenCache}>
-      <RootNavigator fontsReady={canRenderApp} />
+      <QueryProvider>
+        <RootNavigator fontsReady={canRenderApp} />
+      </QueryProvider>
     </ClerkProvider>
   );
 }

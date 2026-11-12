@@ -37,7 +37,22 @@
         }
       ],
       "@clerk/expo",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": false,
+          "microphonePermission": false,
+          "colors": {
+            "cropToolbarColor": "#FFFFFF",
+            "cropToolbarIconColor": "#0F172A",
+            "cropToolbarActionTextColor": "#6C3AED",
+            "cropBackButtonIconColor": "#0F172A",
+            "cropBackgroundColor": "#F8FAFC"
+          }
+        }
+      ],
+      "./plugins/with-short-cmake-object-paths"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -1,0 +1,14 @@
+# Runtime dependencies for the UrLynk API. Pinned to the versions verified in Phase 4.
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.2
+# 2.0.x falls back to pure Python if its compiled extensions cannot load (Windows Smart
+# App Control blocks them on the development machine); 2.1 fails to import instead.
+SQLAlchemy==2.0.57
+alembic==1.20.1
+# On Windows psycopg runs in pure-Python mode and loads libpq.dll from a local PostgreSQL
+# installation's bin folder (see README). Elsewhere, e.g. on Render, the binary build is used.
+psycopg==3.3.8
+psycopg-binary==3.3.8 ; sys_platform != "win32"
+PyJWT[crypto]==2.15.1
+httpx==0.28.1

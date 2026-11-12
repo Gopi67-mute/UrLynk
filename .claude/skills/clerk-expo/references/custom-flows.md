@@ -38,16 +38,30 @@ If the installed `@clerk/expo` is older than 3.4 and hooks don't have this shape
 All flows end the same way. Session tasks (e.g. forced MFA enrollment, org selection) must be handled before navigating:
 
 ```tsx
-const navigateAfterAuth = ({ session, decorateUrl }) => {
-  if (session?.currentTask) {
-    // Route to your session-task UI instead of home.
-    // https://clerk.com/docs/guides/development/custom-flows/authentication/session-tasks
-    return
-  }
-  const url = decorateUrl('/')
-  if (url.startsWith('http')) window.location.href = url // Expo web
-  else router.push(url as Href)
+import { useRouter, type Href } from 'expo-router'
+
+type NavigateAfterAuthParams = {
+  session: { currentTask?: unknown } | null | undefined
+  decorateUrl: (url: string) => string
 }
+
+function useNavigateAfterAuth() {
+  const router = useRouter()
+
+  return ({ session, decorateUrl }: NavigateAfterAuthParams) => {
+    if (session?.currentTask) {
+      // Route to your session-task UI instead of home.
+      // https://clerk.com/docs/guides/development/custom-flows/authentication/session-tasks
+      return
+    }
+    const url = decorateUrl('/')
+    if (url.startsWith('http')) window.location.href = url // Expo web
+    else router.push(url as Href)
+  }
+}
+
+// Inside the auth screen component:
+const navigateAfterAuth = useNavigateAfterAuth()
 
 // on status === 'complete':
 await signIn.finalize({ navigate: navigateAfterAuth }) // same shape for signUp.finalize

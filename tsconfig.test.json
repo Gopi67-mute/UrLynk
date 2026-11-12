@@ -1,0 +1,19 @@
+{
+  // Type-checks the unit tests, which run on Node's built-in test runner
+  // (`npm test`) rather than in React Native.
+  //
+  // They are a separate project on purpose: Node's global types redefine things the
+  // app relies on (timers, fetch, Response), so keeping them out of tsconfig.json
+  // leaves the app's own type-check exactly as strict and React Native-pure as it was.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // Node resolves a `./module.ts` import as written; TypeScript needs this to allow it.
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  // Imported source files are pulled in by the compiler as it follows the imports.
+  // `plugins/` holds build-time Expo config plugins, which are tested the same way.
+  "include": ["src/**/*.test.ts", "plugins/**/*.test.ts"],
+  "exclude": []
+}

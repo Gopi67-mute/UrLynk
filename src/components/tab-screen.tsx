@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, spacing, typography } from "@/theme";
 
@@ -8,8 +8,18 @@ export const SCREEN_GUTTER = spacing.lg;
 /**
  * Scrolling body for a tab. The tab bar sits below it in the layout, so only
  * the status bar inset is needed here.
+ *
+ * Passing `onRefresh` adds pull-to-refresh, for screens backed by the API.
  */
-export function TabScreen({ children }: { children: ReactNode }) {
+export function TabScreen({
+  children,
+  refreshing = false,
+  onRefresh,
+}: {
+  children: ReactNode;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+}) {
   const insets = useSafeAreaInsets();
 
   return (
@@ -21,6 +31,17 @@ export function TabScreen({ children }: { children: ReactNode }) {
         ]}
         showsVerticalScrollIndicator={false}
         overScrollMode="never"
+        refreshControl={
+          onRefresh ? (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              colors={[colors.interaction.primary]}
+              tintColor={colors.interaction.primary}
+              progressViewOffset={insets.top}
+            />
+          ) : undefined
+        }
       >
         {children}
       </ScrollView>

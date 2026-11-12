@@ -1,18 +1,32 @@
+import { useState } from "react";
 import { Image, StyleSheet, Text, View } from "react-native";
 import { colors, fontFamily, gradients } from "@/theme";
 
-/** The account photo when one exists, otherwise initials on the brand gradient. */
+/**
+ * The member's photo when one exists, otherwise initials on the brand gradient.
+ *
+ * `imageUri` is usually a data URI: the leader's saved photo travels inside the API
+ * response rather than as a URL, because a photo URL would need an Authorization
+ * header that expires within the minute. A remote URL works just as well.
+ *
+ * The image is cropped to a circle and fills the frame without distortion, so a
+ * portrait or a landscape original is centred rather than squashed.
+ */
 export function Avatar({
   size,
   initials,
-  imageUrl,
+  imageUri,
   ringColor = colors.neutral.white,
 }: {
   size: number;
   initials: string;
-  imageUrl: string | null;
+  imageUri: string | null;
   ringColor?: string;
 }) {
+  // The image that failed to load, rather than a boolean: a new one is therefore
+  // retried automatically, with no effect needed to reset the flag.
+  const [failedImageUri, setFailedImageUri] = useState<string | null>(null);
+
   const frame = {
     width: size,
     height: size,
@@ -21,12 +35,14 @@ export function Avatar({
     borderColor: ringColor,
   };
 
-  if (imageUrl) {
+  if (imageUri && failedImageUri !== imageUri) {
     return (
       <Image
-        source={{ uri: imageUrl }}
+        source={{ uri: imageUri }}
         style={[styles.image, frame]}
+        resizeMode="cover"
         accessibilityIgnoresInvertColors
+        onError={() => setFailedImageUri(imageUri)}
       />
     );
   }
