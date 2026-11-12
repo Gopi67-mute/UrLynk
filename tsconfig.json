@@ -17,5 +17,9 @@
     "nativewind-env.d.ts",
     ".expo/types/**/*.ts",
     "expo-env.d.ts"
+  ],
+  // Unit tests run on Node, not in React Native; tsconfig.test.json checks them.
+  "exclude": [
+    "**/*.test.ts"
   ]
 }

@@ -76,9 +76,11 @@ export function PushTokenRegistrar() {
       const { status } = await Notifications.requestPermissionsAsync()
       if (status !== 'granted') return
       const token = (await Notifications.getExpoPushTokenAsync()).data
-      await user.update({
-        unsafeMetadata: { ...user.unsafeMetadata, expoPushToken: token },
-      })
+      if (user.unsafeMetadata?.expoPushToken !== token) {
+        await user.update({
+          unsafeMetadata: { ...user.unsafeMetadata, expoPushToken: token },
+        })
+      }
     })()
   }, [isLoaded, user])
 

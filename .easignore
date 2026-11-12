@@ -48,3 +48,6 @@ example
 # Claude and agent skill folders (not needed in EAS builds)
 /.agents/
 /.claude/
+
+# Python backend and its virtual environment (deployed separately, not part of the app)
+/backend/

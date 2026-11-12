@@ -2,6 +2,7 @@ import Constants from "expo-constants";
 import {
   ActivityIndicator,
   Alert,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -11,7 +12,10 @@ import { useAccountProfile } from "@/auth/account";
 import { useSignOut } from "@/auth/session";
 import { Avatar } from "@/components/avatar";
 import { Icon, type IconName } from "@/components/icon";
+import { Skeleton } from "@/components/skeleton";
 import { PageHeader, TabScreen } from "@/components/tab-screen";
+import { useLeaderProfile } from "@/hooks/use-leader-profile";
+import { openEditProfile, openMember } from "@/lib/navigation";
 import {
   colors,
   componentTokens,
@@ -32,6 +36,7 @@ function formatDate(date: Date) {
 
 export default function Settings() {
   const account = useAccountProfile();
+  const leader = useLeaderProfile();
   const { requestSignOut, isSigningOut, signOutFailed } = useSignOut();
   const appVersion = Constants.expoConfig?.version;
 
@@ -46,22 +51,57 @@ export default function Settings() {
     <TabScreen>
       <PageHeader title="Settings" subtitle="Your account and app details" />
 
-      <View style={styles.profileCard}>
+      {/* The UrLynk profile: the preferred name and photo, not the Google account's. */}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${leader.displayName}. Open your profile`}
+        accessibilityState={{ disabled: !leader.memberId }}
+        disabled={!leader.memberId}
+        onPress={() => leader.memberId && openMember(leader.memberId)}
+        style={({ pressed }) => [styles.profileCard, pressed && styles.pressed]}
+      >
         <Avatar
           size={60}
-          initials={account.initials}
-          imageUrl={account.imageUrl}
+          initials={leader.initials}
+          imageUri={leader.photoUri}
           ringColor={colors.interaction.primaryLight}
         />
         <View style={styles.profileText}>
-          <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.profileName}>
-            {account.displayName}
-          </Text>
-          {account.email ? (
+          {/* The saved preferred name, or a placeholder — never the account name,
+              which would flash before it on every cold start. */}
+          {leader.isLoading ? (
+            <View style={styles.profileNameLoading}>
+              <Skeleton width="60%" height={20} />
+            </View>
+          ) : (
+            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.profileName}>
+              {leader.displayName}
+            </Text>
+          )}
+          {leader.email ? (
             <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.profileEmail}>
-              {account.email}
+              {leader.email}
             </Text>
           ) : null}
+        </View>
+        {leader.memberId ? (
+          <Icon name="chevron_right" size={22} color={colors.ui.icon} />
+        ) : null}
+      </Pressable>
+
+      <View style={styles.group}>
+        <Text maxFontSizeMultiplier={1.3} style={styles.groupTitle}>
+          Profile
+        </Text>
+        <View style={styles.groupCard}>
+          <ActionRow
+            icon="edit"
+            label="Edit profile"
+            detail="Name, photo, business details"
+            onPress={() => leader.memberId && openEditProfile(leader.memberId)}
+            disabled={!leader.memberId}
+            isLast
+          />
         </View>
       </View>
 
@@ -81,6 +121,9 @@ export default function Settings() {
             />
           ) : null}
         </View>
+        <Text maxFontSizeMultiplier={1.3} style={styles.groupNote}>
+          Your verified sign-in details. Editing your UrLynk profile does not change them.
+        </Text>
       </View>
 
       {appVersion ? (
@@ -117,7 +160,7 @@ export default function Settings() {
 
         {signOutFailed ? (
           <Text accessibilityLiveRegion="polite" style={styles.error}>
-            We couldn't sign you out. Check your connection and try again.
+            {"We couldn't sign you out. Check your connection and try again."}
           </Text>
         ) : null}
       </View>
@@ -151,7 +194,72 @@ function InfoRow({
   );
 }
 
+/** A settings row that goes somewhere, rather than one that states a value. */
+function ActionRow({
+  icon,
+  label,
+  detail,
+  onPress,
+  disabled = false,
+  isLast = false,
+}: {
+  icon: IconName;
+  label: string;
+  detail: string;
+  onPress: () => void;
+  disabled?: boolean;
+  isLast?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${label}. ${detail}`}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.row,
+        !isLast && styles.rowDivider,
+        disabled && styles.disabled,
+        pressed && !disabled && styles.pressed,
+      ]}
+    >
+      <View style={styles.rowIcon}>
+        <Icon name={icon} size={20} color={colors.interaction.primary} />
+      </View>
+      <View style={styles.actionText}>
+        <Text maxFontSizeMultiplier={1.3} style={styles.rowLabel}>
+          {label}
+        </Text>
+        <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={styles.actionDetail}>
+          {detail}
+        </Text>
+      </View>
+      <Icon name="chevron_right" size={22} color={colors.ui.icon} />
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
+  pressed: {
+    opacity: 0.85,
+  },
+  disabled: {
+    opacity: 0.5,
+  },
+  actionText: {
+    flex: 1,
+    gap: 1,
+  },
+  actionDetail: {
+    ...typography.bodySmall,
+    color: colors.ui.textSecondary,
+  },
+  groupNote: {
+    ...typography.bodySmall,
+    paddingHorizontal: spacing.xs,
+    color: colors.ui.textSecondary,
+  },
   profileCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -171,6 +279,11 @@ const styles = StyleSheet.create({
     ...typography.h3,
     fontFamily: fontFamily.bold,
     color: colors.ui.textPrimary,
+  },
+  // Matches the name line's height, so the card does not resize once it loads.
+  profileNameLoading: {
+    height: typography.h3.lineHeight,
+    justifyContent: "center",
   },
   profileEmail: {
     ...typography.bodyMedium,

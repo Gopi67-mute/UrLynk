@@ -39,6 +39,9 @@ export default function Layout() {
 
 ```tsx
 // src/app/(auth)/_layout.tsx — keep signed-in users out of auth screens
+import { useAuth } from '@clerk/expo'
+import { Redirect, Stack } from 'expo-router'
+
 export default function AuthRoutesLayout() {
   const { isSignedIn, isLoaded } = useAuth()
 

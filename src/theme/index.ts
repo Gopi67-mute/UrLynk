@@ -1,6 +1,8 @@
 export { colors, statusColors } from "./colors";
 export type { BrandColor, SemanticColor } from "./colors";
 export { gradients } from "./gradients";
+export { placementStyle } from "./placement";
+export type { PlacementSide } from "./placement";
 export type { GradientName } from "./gradients";
 export { spacing } from "./spacing";
 export { radius } from "./radius";

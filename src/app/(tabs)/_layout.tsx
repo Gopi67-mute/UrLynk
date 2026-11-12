@@ -6,9 +6,11 @@ import { Icon, type IconName } from "@/components/icon";
 import { colors } from "@/theme";
 
 function tabIcon(name: IconName) {
-  return ({ color, size }: { color: ColorValue; size: number }) => (
-    <Icon name={name} size={size} color={color} />
-  );
+  // Named, so it reads as a component in warnings and in the React dev tools.
+  function TabBarIcon({ color, size }: { color: ColorValue; size: number }) {
+    return <Icon name={name} size={size} color={color} />;
+  }
+  return TabBarIcon;
 }
 
 /** Signed-in area. The root layout's guard keeps signed-out users out of it. */

@@ -62,7 +62,8 @@ export async function POST(req: NextRequest) {
   if (evt.type === 'user.updated') {
     const { id, email_addresses, first_name, last_name } = evt.data
     const email = email_addresses[0]?.email_address
-    await db.users.update({ where: { clerkId: id }, data: { email, first_name, last_name } })
+    const name = `${first_name ?? ''} ${last_name ?? ''}`.trim()
+    await db.users.update({ where: { clerkId: id }, data: { email, name } })
   }
 
   if (evt.type === 'user.deleted') {
