@@ -3,17 +3,23 @@ import type { MemberSummary } from "@/api/members";
 import type { TeamOverview } from "@/api/teams";
 import { Avatar } from "@/components/avatar";
 import { Button } from "@/components/button";
+import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
+import { FreshnessNotice } from "@/components/freshness-notice";
 import { Icon } from "@/components/icon";
+import { EmptyFace, MemberFace } from "@/components/member-face";
 import { Skeleton, SkeletonCard } from "@/components/skeleton";
 import { StatTile } from "@/components/stat-tile";
 import { PageHeader, TabScreen } from "@/components/tab-screen";
+import { branchView } from "@/features/team/branch-view";
 import { useLeaderProfile } from "@/hooks/use-leader-profile";
 import { useMemberChildren } from "@/hooks/use-members";
+import { useScreenStatus } from "@/hooks/use-screen-state";
 import { useTeamOverview } from "@/hooks/use-team";
 import { initialsFor } from "@/lib/names";
 import { openAddMember, openMember } from "@/lib/navigation";
-import { slotState, type SlotState } from "@/lib/slot-state";
+import { worseOf, type ScreenState } from "@/lib/screen-state";
+import { slotStateFor, type SlotState } from "@/lib/slot-state";
 import {
   colors,
   componentTokens,
@@ -41,6 +47,12 @@ export default function Team() {
   const rootId = overview.data?.root_member.id;
   const children = useMemberChildren(rootId);
 
+  // The same two requests Home reads, from the same cache entries — so opening one
+  // after the other costs nothing, and the two screens cannot disagree about a position.
+  const team = useScreenStatus(overview);
+  const slots = useScreenStatus(children);
+  const branchState = worseOf(team.state, slots.state);
+
   function refresh() {
     void overview.refetch();
     if (rootId) void children.refetch();
@@ -58,9 +70,27 @@ export default function Team() {
         subtitle={leader.teamName ?? "Your LEFT and RIGHT team structure"}
       />
 
-      {overview.isPending ? (
-        <LoadingTeam />
-      ) : overview.isError ? (
+      <FreshnessNotice state={branchState} updatedAt={team.updatedAt} />
+
+      {/* A team saved on this device is drawn from the cache immediately; the skeleton
+          below belongs only to a leader who has never loaded it here. A refresh happens
+          underneath the tree rather than in place of it. */}
+      {overview.data ? (
+        <LoadedTeam
+          overview={overview.data}
+          left={children.data?.left ?? null}
+          right={children.data?.right ?? null}
+          branchState={branchState}
+          childrenError={slots.state === "failed" ? children.error : null}
+          onRetryChildren={() => void children.refetch()}
+        />
+      ) : team.state === "offline-empty" ? (
+        <EmptyState
+          icon="wifi_off"
+          title="Your team isn't on this device yet"
+          message="Connect to the internet once and your team structure will be here the next time you open UrLynk, with or without a connection."
+        />
+      ) : team.state === "failed" ? (
         <ErrorState
           error={overview.error}
           title="We couldn't load your team"
@@ -68,14 +98,7 @@ export default function Team() {
           isRetrying={overview.isFetching}
         />
       ) : (
-        <LoadedTeam
-          overview={overview.data}
-          left={children.data?.left ?? null}
-          right={children.data?.right ?? null}
-          childrenPending={children.isPending}
-          childrenError={children.isError ? children.error : null}
-          onRetryChildren={() => void children.refetch()}
-        />
+        <LoadingTeam />
       )}
     </TabScreen>
   );
@@ -85,14 +108,14 @@ function LoadedTeam({
   overview,
   left,
   right,
-  childrenPending,
+  branchState,
   childrenError,
   onRetryChildren,
 }: {
   overview: TeamOverview;
   left: MemberSummary | null;
   right: MemberSummary | null;
-  childrenPending: boolean;
+  branchState: ScreenState;
   childrenError: unknown;
   onRetryChildren: () => void;
 }) {
@@ -110,15 +133,15 @@ function LoadedTeam({
           <BranchSlot
             side="LEFT"
             member={left}
-            size={counts.left_members}
-            state={slotState(childrenPending, childrenError, left)}
+            sideTotal={counts.left_members}
+            state={slotStateFor(branchState, left)}
             rootId={root.id}
           />
           <BranchSlot
             side="RIGHT"
             member={right}
-            size={counts.right_members}
-            state={slotState(childrenPending, childrenError, right)}
+            sideTotal={counts.right_members}
+            state={slotStateFor(branchState, right)}
             rootId={root.id}
           />
         </View>
@@ -214,24 +237,41 @@ function LeaderCard({ memberId, name }: { memberId: string; name: string }) {
   );
 }
 
-/** One of the root's two positions: the member in it, or an invitation to fill it. */
+/**
+ * One of the root's two positions: the member in it, or an invitation to fill it.
+ *
+ * The words come from `branchView`, the same function the dashboard's branch cards use,
+ * so the same position cannot be described differently on the two screens. `sideTotal`
+ * is the whole branch from the overview's recursive count; the card states how many of
+ * those sit *below* the member it names.
+ */
 function BranchSlot({
   side,
   member,
-  size,
+  sideTotal,
   state,
   rootId,
 }: {
   side: PlacementSide;
   member: MemberSummary | null;
-  size: number;
+  sideTotal: number;
   state: SlotState;
   rootId: string;
 }) {
-  const { label, accent, tint } = placementStyle[side];
+  const { accent, tint } = placementStyle[side];
+  const view = branchView({ side, member, sideTotal, state, rootId });
   const filled = state === "filled" && member !== null;
   const loading = state === "loading";
   const unavailable = state === "unavailable";
+
+  function enter() {
+    const action = view.action;
+    if (action.kind === "member") {
+      openMember(action.memberId);
+    } else if (action.kind === "add") {
+      openAddMember(action.parentId, action.position);
+    }
+  }
 
   return (
     <View style={styles.branchColumn}>
@@ -246,19 +286,10 @@ function BranchSlot({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={
-          loading
-            ? `${label} position, loading`
-            : unavailable
-              ? `${label} position, not available`
-              : filled
-                ? `${label} position: ${member.name}. ${size} ${size === 1 ? "member" : "members"} on this side`
-                : `${label} position is open. Add a member here`
-        }
-        onPress={() =>
-          filled && member ? openMember(member.id) : openAddMember(rootId, side)
-        }
-        disabled={loading || unavailable}
+        accessibilityLabel={view.accessibilityLabel}
+        accessibilityHint={view.accessibilityHint}
+        onPress={enter}
+        disabled={view.action.kind === "none"}
         style={({ pressed }) => [
           styles.branchSlot,
           {
@@ -271,7 +302,7 @@ function BranchSlot({
       >
         <View style={[styles.branchPill, { backgroundColor: accent }]}>
           <Text allowFontScaling={false} style={styles.branchPillLabel}>
-            {label}
+            {view.label}
           </Text>
         </View>
 
@@ -280,42 +311,27 @@ function BranchSlot({
             <Skeleton width={44} height={44} corner={radius.pill} />
             <Skeleton width="80%" height={14} />
           </View>
-        ) : unavailable ? (
-          <>
-            <View style={[styles.branchAvatar, styles.branchAvatarEmpty]}>
-              <Icon name="cloud_off" size={22} color={colors.ui.icon} />
-            </View>
-            <Text numberOfLines={2} maxFontSizeMultiplier={1.2} style={styles.branchName}>
-              Not available
-            </Text>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              Pull to refresh
-            </Text>
-          </>
-        ) : filled && member ? (
-          <>
-            <View style={[styles.branchAvatar, { borderColor: `${accent}55` }]}>
-              <Text allowFontScaling={false} style={[styles.branchInitials, { color: accent }]}>
-                {initialsFor(member.name)}
-              </Text>
-            </View>
-            <Text numberOfLines={2} maxFontSizeMultiplier={1.2} style={styles.branchName}>
-              {member.name}
-            </Text>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              {size} {size === 1 ? "member" : "members"}
-            </Text>
-          </>
         ) : (
           <>
-            <View style={[styles.branchAvatar, styles.branchAvatarEmpty]}>
-              <Icon name="person_add" size={24} color={accent} />
+            <View style={styles.branchFace}>
+              {unavailable ? (
+                <EmptyFace size={44}>
+                  <Icon name="cloud_off" size={22} color={colors.ui.icon} />
+                </EmptyFace>
+              ) : filled && member ? (
+                /* The member's own photograph, with their initials as the fallback. */
+                <MemberFace member={member} size={44} side={side} />
+              ) : (
+                <EmptyFace size={44}>
+                  <Icon name="person_add" size={24} color={accent} />
+                </EmptyFace>
+              )}
             </View>
             <Text numberOfLines={2} maxFontSizeMultiplier={1.2} style={styles.branchName}>
-              Open position
+              {view.title}
             </Text>
             <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              Tap to add
+              {filled ? view.meta : unavailable ? view.meta : "Tap to add"}
             </Text>
           </>
         )}
@@ -441,23 +457,8 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingVertical: spacing.xs,
   },
-  branchAvatar: {
-    width: 44,
-    height: 44,
+  branchFace: {
     marginTop: spacing.xs,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderRadius: radius.pill,
-    backgroundColor: colors.neutral.white,
-  },
-  branchAvatarEmpty: {
-    borderStyle: "dashed",
-    borderColor: colors.ui.borderStrong,
-  },
-  branchInitials: {
-    fontFamily: fontFamily.bold,
-    fontSize: 15,
   },
   branchPill: {
     paddingHorizontal: spacing.base,

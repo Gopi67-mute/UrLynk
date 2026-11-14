@@ -279,6 +279,110 @@ def test_a_very_deep_single_leg_stays_workable(
     assert counts_seconds < SINGLE_REQUEST_BUDGET_SECONDS
 
 
+def test_searching_a_large_team_is_bounded_and_quick(
+    api_client: TestClient, leader: Leader, large_team: dict
+) -> None:
+    """Search over 1,000 members: one page, however many match.
+
+    The seeded names all begin "Member", so this is the worst realistic case — every
+    member matches — and the response must still be one bounded page rather than a
+    thousand rows.
+    """
+    print(f"\nSearch, team of {TEAM_SIZE + 1}:")
+
+    started = time.perf_counter()
+    broad = api_client.get(
+        f"{MEMBERS}/search", params={"q": "Member", "limit": 25}, headers=leader.headers
+    )
+    broad_seconds = _elapsed("GET /members/search (matches every member)", started)
+
+    assert broad.status_code == 200, broad.text
+    assert len(broad.json()["items"]) == 25
+    assert broad.json()["next_cursor"]
+    assert broad_seconds < SINGLE_REQUEST_BUDGET_SECONDS
+
+    started = time.perf_counter()
+    narrow = api_client.get(
+        f"{MEMBERS}/search", params={"q": "Member 0500"}, headers=leader.headers
+    )
+    narrow_seconds = _elapsed("GET /members/search (one name)", started)
+
+    assert [item["name"] for item in narrow.json()["items"]] == ["Member 0500"]
+    assert narrow_seconds < SINGLE_REQUEST_BUDGET_SECONDS
+
+    started = time.perf_counter()
+    by_id = api_client.get(f"{MEMBERS}/search", params={"q": "1000000500"}, headers=leader.headers)
+    by_id_seconds = _elapsed("GET /members/search (full Mi Lifestyle ID)", started)
+
+    assert [item["name"] for item in by_id.json()["items"]] == ["Member 0500"]
+    assert by_id_seconds < SINGLE_REQUEST_BUDGET_SECONDS
+
+
+def test_the_search_query_plan_is_bounded_by_the_team(
+    api_client: TestClient, leader: Leader, large_team: dict, session_factory
+) -> None:
+    """What the search actually costs, printed rather than assumed.
+
+    No index is added for the name match on purpose. `ILIKE '%term%'` is not a prefix,
+    so no B-tree can serve it; the alternative is a pg_trgm GIN index, which means an
+    extension and a migration. At V1's stated scale — a thousand members — the planner
+    reads one team's rows and sorts a bounded page, which the timings above show costs
+    single-digit milliseconds. The plan is printed here so the decision can be revisited
+    with evidence if teams grow well beyond that.
+
+    What *is* asserted is the part that must never regress: the scan is filtered by
+    `team_id`, and the page is bounded by a LIMIT rather than materialised in full.
+    """
+    team_id = large_team["overview"]["team"]["id"]
+
+    with session_factory() as session:
+        plan = "\n".join(
+            row[0]
+            for row in session.execute(
+                text(
+                    "EXPLAIN ANALYZE SELECT * FROM members"
+                    " WHERE team_id = :team_id"
+                    "   AND (name ILIKE :pattern OR mi_lifestyle_id ILIKE :prefix)"
+                    " ORDER BY lower(name), id LIMIT 26"
+                ),
+                {"team_id": team_id, "pattern": "%Member 05%", "prefix": "100000%"},
+            ).all()
+        )
+
+    print(f"\nSearch plan:\n{plan}")
+    assert "team_id" in plan, plan
+    assert "Limit" in plan, plan
+
+
+def test_a_placement_path_down_a_deep_leg_is_one_bounded_request(
+    api_client: TestClient, leader: Leader, session_factory
+) -> None:
+    """The exact path for the deepest member of a 400-step leg.
+
+    One request, one recursive walk and one read: never a request per ancestor, and
+    never the whole tree.
+    """
+    overview = api_client.post(
+        INITIALIZE, json={"display_name": "Asha Patel"}, headers=leader.headers
+    ).json()
+    with session_factory() as session:
+        deepest = _seed_single_leg(session, uuid.UUID(overview["team"]["id"]), DEEP_LEG_DEPTH)
+
+    print(f"\nPlacement path down a leg {DEEP_LEG_DEPTH} deep:")
+
+    started = time.perf_counter()
+    response = api_client.get(f"{MEMBERS}/{deepest}/placement-path", headers=leader.headers)
+    seconds = _elapsed("GET /members/{id}/placement-path", started)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["depth"] == DEEP_LEG_DEPTH
+    assert len(body["steps"]) == DEEP_LEG_DEPTH + 1
+    assert body["steps"][0]["is_root"] is True
+    assert body["steps"][-1]["id"] == str(deepest)
+    assert seconds < SINGLE_REQUEST_BUDGET_SECONDS
+
+
 def test_reading_a_parents_children_uses_an_index(
     api_client: TestClient, leader: Leader, large_team: dict, session_factory
 ) -> None:

@@ -32,3 +32,27 @@ def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
         return datetime.fromisoformat(created_at_text), uuid.UUID(member_id_text)
     except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
         raise ApiError(400, "invalid_cursor", "That page reference isn't valid.") from exc
+
+
+def encode_name_cursor(sort_name: str, member_id: uuid.UUID) -> str:
+    """A cursor for a collection ordered by `(lower(name), id)`, such as search results."""
+    raw = f"{sort_name}{_SEPARATOR}{member_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def decode_name_cursor(cursor: str) -> tuple[str, uuid.UUID]:
+    """The sort position a name cursor names, or a 400.
+
+    Split from the *right*: a member's name may legitimately contain the separator, while
+    the identifier that follows it never can.
+    """
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        sort_name, separator, member_id_text = (
+            base64.urlsafe_b64decode(padded.encode()).decode().rpartition(_SEPARATOR)
+        )
+        if not separator:
+            raise ValueError("A name cursor carries both a name and an identifier.")
+        return sort_name, uuid.UUID(member_id_text)
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ApiError(400, "invalid_cursor", "That page reference isn't valid.") from exc

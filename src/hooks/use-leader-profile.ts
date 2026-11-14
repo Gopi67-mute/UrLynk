@@ -27,8 +27,23 @@ export type LeaderProfile = {
    * name while this is true, so a screen that renders it anyway would flash the
    * Google name before the preferred one on every cold start. Show a placeholder
    * for the name instead — the rest of the card can draw immediately.
+   *
+   * Once the team has been loaded on this device at least once it is false from the
+   * first frame, because the root member comes back from the cache before any request
+   * is made. That is the whole point of the local cache: the leader's own name should
+   * not be the last thing to arrive on their own dashboard.
    */
   isLoading: boolean;
+  /**
+   * True when the saved profile could not be read at all — offline on a cold start, or
+   * the request failed with nothing cached.
+   *
+   * Treated exactly like `isLoading` by the screens, and for the same reason: the only
+   * name available in that state is the Google account's, and showing it would put the
+   * name the leader replaced back on their dashboard. A placeholder says "not known
+   * yet", which is true; "jgopi nath" would not be.
+   */
+  isUnavailable: boolean;
 };
 
 /**
@@ -70,8 +85,13 @@ export function useLeaderProfile(): LeaderProfile {
     photoUri: photo.data?.data_uri ?? null,
     email: account.email,
     teamName,
-    // `isLoading`, not `isPending`: a query that is disabled — before the account is
-    // known — reports "pending" indefinitely, and a screen would wait on it forever.
-    isLoading: overview.isLoading,
+    // Both answers come from one fact — whether the root member is known — rather than
+    // from the query's flags, and that is deliberate. A query can be disabled (before
+    // the account is known), paused (offline), pending, or failed, and in every one of
+    // those states the honest answer about the leader's name is the same: not yet. A
+    // flag-by-flag reading missed the paused case in particular, which would have put
+    // the Google account's name on the dashboard of a leader with no connection.
+    isLoading: root === undefined && !overview.isError,
+    isUnavailable: root === undefined && overview.isError,
   };
 }

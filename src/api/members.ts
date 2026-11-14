@@ -56,6 +56,100 @@ export type MemberPage = {
   next_cursor: string | null;
 };
 
+/**
+ * One search match, with just enough to recognise the right person.
+ *
+ * The placement parent is named because two members can share a name, and "LEFT under
+ * Ajay" is what tells them apart. No phone number and no notes: a result is a way to
+ * reach a member, not a copy of their record.
+ */
+export type MemberSearchResult = MemberSummary & {
+  placement_parent_id: string | null;
+  placement_parent_name: string | null;
+};
+
+export type MemberSearchPage = {
+  items: MemberSearchResult[];
+  next_cursor: string | null;
+};
+
+/**
+ * The exact chain of placements from the team's root down to one member.
+ *
+ * `steps` is root first and the member last, and each step's `placement_position` is the
+ * side it occupies under the step before it — so the root's null is correct rather than
+ * missing, since nobody sits above it. Reading the list top to bottom is reading the way
+ * down to the member.
+ *
+ * Calculated by PostgreSQL from the real placement relationships. Nothing here is
+ * inferred from registration order, identifiers or timestamps, and the app never
+ * reconstructs it from the tree.
+ */
+export type MemberPlacementPath = {
+  member: MemberSummary;
+  steps: MemberSummary[];
+  /** Placement edges between the root and the member: `steps.length - 1`. */
+  depth: number;
+};
+
+/** One step on the way down to a reattachment destination. */
+export type PlacementPathEntry = {
+  id: string;
+  name: string;
+  /**
+   * The side this member occupies under the previous step. The first entry is the
+   * promoted member, so it has none.
+   */
+  placement_position: PlacementPosition | null;
+};
+
+/** Where the child who is not promoted ends up, with everyone below them. */
+export type SubtreeReattachment = {
+  member: MemberSummary;
+  /** That member and every descendant: how many people move. */
+  member_count: number;
+  destination: MemberSummary;
+  destination_position: PlacementPosition;
+  /** From the promoted member down to the destination, inclusive. */
+  destination_path: PlacementPathEntry[];
+};
+
+/**
+ * What deleting a member would do, as the backend calculates it.
+ *
+ * Three shapes, by how many members sit directly below the one being deleted:
+ *
+ * - none: `promotable` is empty, `promoted` and `reattachment` are null. An ordinary
+ *   deletion.
+ * - one: `promoted` already names them; there is nothing to choose and nothing to move.
+ * - two: `requires_promotion_choice` is true and `promotable` holds both, LEFT first.
+ *   Asking again with that choice fills in `promoted` and `reattachment`.
+ *
+ * `plan_token` fingerprints this exact plan. It is sent back to confirm, and a team
+ * that changed in the meantime makes the confirmation a `reorganization_preview_stale`
+ * refusal rather than a change the leader never saw.
+ */
+export type MemberDeletionPlan = {
+  member: MemberSummary;
+  placement_parent: MemberSummary | null;
+  placement_position: PlacementPosition | null;
+  promotable: MemberSummary[];
+  requires_promotion_choice: boolean;
+  promoted: MemberSummary | null;
+  reattachment: SubtreeReattachment | null;
+  plan_token: string;
+};
+
+/** What the confirmed deletion did, with the team's counts after it. */
+export type MemberDeletionResult = {
+  deleted_member_id: string;
+  promoted: MemberSummary | null;
+  reattached: MemberSummary | null;
+  reattached_to: MemberSummary | null;
+  reattached_position: PlacementPosition | null;
+  counts: { total_members: number; left_members: number; right_members: number };
+};
+
 /** The fields POST /api/v1/members accepts. Anything else is rejected with 422. */
 export type NewMember = {
   name: string;
@@ -94,6 +188,9 @@ export type MemberUpdate = {
 
 export const MEMBER_PAGE_SIZE = 50;
 
+/** How many search results a page holds. The backend caps it at 50 regardless. */
+export const SEARCH_PAGE_SIZE = 25;
+
 /** How many recent members Home asks for. The backend caps it regardless. */
 export const RECENT_MEMBER_COUNT = 5;
 
@@ -114,6 +211,51 @@ export function getMember(
   signal?: AbortSignal,
 ): Promise<MemberDetail> {
   return client.request<MemberDetail>(`/api/v1/members/${memberId}`, { signal });
+}
+
+/**
+ * Find members of the signed-in leader's own team by name or Mi Lifestyle ID.
+ *
+ * The matching happens in the database: the team is never downloaded and filtered here.
+ * A name matches anywhere within it and without regard to case; a query of digits also
+ * matches the start of a Mi Lifestyle ID, leading zeros included.
+ *
+ * Results come back ordered by name, so the same query twice gives the same order and
+ * paging with `cursor` cannot repeat or skip a member. The backend rejects a blank query
+ * (`search_query_required`) — callers are expected not to send one.
+ */
+export function searchMembers(
+  client: ApiClient,
+  query: string,
+  options: { cursor?: string | null; limit?: number; signal?: AbortSignal } = {},
+): Promise<MemberSearchPage> {
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(options.limit ?? SEARCH_PAGE_SIZE),
+  });
+  if (options.cursor) params.set("cursor", options.cursor);
+  return client.request<MemberSearchPage>(`/api/v1/members/search?${params.toString()}`, {
+    signal: options.signal,
+  });
+}
+
+/**
+ * The exact placement path from the team's root down to this member.
+ *
+ * One request for the whole chain, calculated in the database — never one request per
+ * ancestor, and never the tree. Rejects with `member_not_found` for a member of another
+ * team, and `placement_chain_invalid` when the chain is damaged, which the screen
+ * reports rather than drawing a partial path as if it were complete.
+ */
+export function getPlacementPath(
+  client: ApiClient,
+  memberId: string,
+  signal?: AbortSignal,
+): Promise<MemberPlacementPath> {
+  return client.request<MemberPlacementPath>(
+    `/api/v1/members/${memberId}/placement-path`,
+    { signal },
+  );
 }
 
 /** Only the two direct slots: no subtree is ever downloaded. */
@@ -151,6 +293,53 @@ export function updateMember(
  */
 export function deleteMember(client: ApiClient, memberId: string): Promise<void> {
   return client.request<void>(`/api/v1/members/${memberId}`, { method: "DELETE" });
+}
+
+/**
+ * What deleting this member would do — a preview, and nothing more.
+ *
+ * Reads only: no position is reserved and nothing is written, so a leader can look at
+ * a plan and walk away. `promote` picks which of two children takes the deleted
+ * member's position, which is what fills in the destination for the other one's branch.
+ *
+ * Rejects with `root_member_undeletable` or `member_sponsors_others` for a member who
+ * cannot be deleted at all, so the screen can say why before offering anything.
+ */
+export function getMemberDeletionPlan(
+  client: ApiClient,
+  memberId: string,
+  options: { promote?: string | null; signal?: AbortSignal } = {},
+): Promise<MemberDeletionPlan> {
+  const query = options.promote ? `?promote=${encodeURIComponent(options.promote)}` : "";
+  return client.request<MemberDeletionPlan>(
+    `/api/v1/members/${memberId}/deletion-plan${query}`,
+    { signal: options.signal },
+  );
+}
+
+/**
+ * Carry out the plan: reorganize the team and delete the member, or change nothing.
+ *
+ * `planToken` is the fingerprint from the preview the leader actually saw. The server
+ * recalculates the plan and compares, so a team that changed in the meantime is a
+ * `reorganization_preview_stale` refusal with nothing written — fetch the plan again
+ * and show them the new one.
+ *
+ * The destination is never sent from here. It is the server's own, recalculated inside
+ * the same transaction that applies it.
+ */
+export function confirmMemberDeletion(
+  client: ApiClient,
+  memberId: string,
+  body: { promoteMemberId?: string | null; planToken: string },
+): Promise<MemberDeletionResult> {
+  return client.request<MemberDeletionResult>(`/api/v1/members/${memberId}/deletion`, {
+    method: "POST",
+    body: {
+      plan_token: body.planToken,
+      ...(body.promoteMemberId ? { promote_member_id: body.promoteMemberId } : {}),
+    },
+  });
 }
 
 /**

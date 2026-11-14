@@ -38,17 +38,30 @@ export class ApiError extends Error {
   readonly status: number | null;
   /** The backend's machine-readable error code, when it sent one. */
   readonly code: string | null;
+  /**
+   * Structured facts the backend sent with the refusal, such as which member is
+   * blocking an operation. Always read defensively: it is whatever the server sent,
+   * and most errors carry none. The server's own prose is deliberately not kept —
+   * screens compose their own wording from the code and these values.
+   */
+  readonly details: unknown;
   readonly requestId: string | null;
 
   constructor(
     kind: ApiErrorKind,
-    options: { status?: number | null; code?: string | null; requestId?: string | null } = {},
+    options: {
+      status?: number | null;
+      code?: string | null;
+      requestId?: string | null;
+      details?: unknown;
+    } = {},
   ) {
     super(USER_MESSAGES[kind]);
     this.name = "ApiError";
     this.kind = kind;
     this.status = options.status ?? null;
     this.code = options.code ?? null;
+    this.details = options.details ?? null;
     this.requestId = options.requestId ?? null;
   }
 
@@ -68,6 +81,27 @@ export function isApiError(error: unknown): error is ApiError {
  */
 export type TokenProvider = (options: { forceRefresh: boolean }) => Promise<string | null>;
 
+/**
+ * What one finished request cost, for measurement.
+ *
+ * Reported per *logical* request rather than per fetch: a token that expired between
+ * minting and arrival is retried once inside `request`, and `attempts` says so, because
+ * "one request that took 600 ms" and "two attempts that took 300 ms each" are different
+ * findings.
+ *
+ * `path` has its query string removed before it reaches here — a search term names the
+ * member a leader was looking for, and that does not belong in a log line.
+ */
+export type RequestEvent = {
+  method: string;
+  path: string;
+  durationMs: number;
+  /** The HTTP status, or null when no response arrived. */
+  status: number | null;
+  kind: ApiErrorKind | null;
+  attempts: number;
+};
+
 export type ApiClientOptions = {
   baseUrl: string | undefined;
   getToken: TokenProvider;
@@ -75,6 +109,14 @@ export type ApiClientOptions = {
   /** Plain http:// is only acceptable for local development (e.g. over `adb reverse`). */
   allowInsecureHttp?: boolean;
   fetchImpl?: typeof fetch;
+  /**
+   * Called once per finished request, successful or not.
+   *
+   * The one place that knows how many requests a screen really makes and what each
+   * costs. It must not throw: a broken observer would turn a successful request into a
+   * failed one, so anything it raises is swallowed.
+   */
+  onRequestComplete?: (event: RequestEvent) => void;
 };
 
 export type RequestOptions = {
@@ -116,21 +158,23 @@ function normalizeBaseUrl(
 
 async function readErrorBody(
   response: Response,
-): Promise<{ code: string | null; requestId: string | null }> {
+): Promise<{ code: string | null; requestId: string | null; details: unknown }> {
   const headerRequestId = response.headers.get("X-Request-ID");
   try {
     const body: unknown = await response.json();
     const error =
       body && typeof body === "object" && "error" in body
-        ? (body as { error?: { code?: unknown; request_id?: unknown } }).error
+        ? (body as { error?: { code?: unknown; request_id?: unknown; details?: unknown } })
+            .error
         : undefined;
     return {
       code: typeof error?.code === "string" ? error.code : null,
       requestId:
         typeof error?.request_id === "string" ? error.request_id : headerRequestId,
+      details: error?.details ?? null,
     };
   } catch {
-    return { code: null, requestId: headerRequestId };
+    return { code: null, requestId: headerRequestId, details: null };
   }
 }
 
@@ -168,7 +212,11 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     }
   }
 
-  async function request<T>(path: string, requestOptions: RequestOptions = {}): Promise<T> {
+  async function performRequest<T>(
+    path: string,
+    requestOptions: RequestOptions,
+    counter: { attempts: number; status: number | null },
+  ): Promise<T> {
     const baseUrl = normalizeBaseUrl(options.baseUrl, options.allowInsecureHttp ?? false);
     if (baseUrl instanceof ApiError) throw baseUrl;
 
@@ -182,6 +230,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     const url = `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
 
     async function attempt(forceRefresh: boolean): Promise<Response> {
+      counter.attempts += 1;
       const headers: Record<string, string> = { Accept: "application/json" };
       if (body !== undefined) headers["Content-Type"] = "application/json";
 
@@ -210,13 +259,15 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     if (response.status === 401 && authenticated) {
       response = await attempt(true);
     }
+    counter.status = response.status;
 
     if (!response.ok) {
-      const { code, requestId } = await readErrorBody(response);
+      const { code, requestId, details } = await readErrorBody(response);
       throw new ApiError(kindForStatus(response.status), {
         status: response.status,
         code,
         requestId,
+        details,
       });
     }
 
@@ -229,6 +280,48 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
         status: response.status,
         requestId: response.headers.get("X-Request-ID"),
       });
+    }
+  }
+
+  /**
+   * One request, measured.
+   *
+   * The measurement wraps the whole logical request — token, fetch, the single 401
+   * retry and the response body — because that is what a screen actually waits for.
+   * With no observer configured this is the bare request and costs nothing.
+   */
+  async function request<T>(path: string, requestOptions: RequestOptions = {}): Promise<T> {
+    const observer = options.onRequestComplete;
+    if (!observer) {
+      return performRequest<T>(path, requestOptions, { attempts: 0, status: null });
+    }
+
+    const counter: { attempts: number; status: number | null } = { attempts: 0, status: null };
+    const started = Date.now();
+
+    function report(status: number | null, kind: ApiErrorKind | null): void {
+      try {
+        observer!({
+          method: requestOptions.method ?? "GET",
+          path: path.split("?")[0],
+          durationMs: Date.now() - started,
+          status,
+          kind,
+          attempts: counter.attempts,
+        });
+      } catch {
+        // An observer is an instrument, never a reason for a request to fail.
+      }
+    }
+
+    try {
+      const result = await performRequest<T>(path, requestOptions, counter);
+      report(counter.status, null);
+      return result;
+    } catch (error) {
+      if (isApiError(error)) report(error.status, error.kind);
+      else report(null, null); // a caller's cancellation, passed through untouched
+      throw error;
     }
   }
 

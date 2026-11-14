@@ -27,6 +27,14 @@ const TEAM_IMAGE_MIN_HEIGHT = 160;
 const TEAM_IMAGE_FADE_HEIGHT = spacing.xl;
 const SHORT_SCREEN_HEIGHT = 640;
 
+/** The same soft wave backdrop the authentication screen uses, at the same scale. */
+const WAVE_TOP_ASPECT_RATIO = 1080 / 360;
+const WAVE_BOTTOM_ASPECT_RATIO = 1080 / 260;
+
+/** How much higher the artwork and the button sit now that a wave fills the foot. */
+const ART_LIFT = spacing.base;
+const BUTTON_LIFT = spacing.xl;
+
 /**
  * The team photo is landscape, so matching the reference means running it past
  * both screen edges. The shift centers the leader and keeps the arrow on screen;
@@ -81,6 +89,7 @@ export default function Onboarding() {
   return (
     <View style={styles.screen}>
       <StatusBar style="dark" />
+      <Backdrop width={width} />
 
       {/* Only scrolls when large system fonts outgrow a short screen. */}
       <ScrollView
@@ -161,10 +170,15 @@ export default function Onboarding() {
           {
             paddingBottom:
               Math.max(insets.bottom, spacing.base) +
-              clamp(spareHeight * 0.2, spacing.sm, spacing.xxxl),
+              clamp(spareHeight * 0.2, spacing.sm, spacing.xxxl) +
+              BUTTON_LIFT,
           },
         ]}
       >
+        {/* Carries the fade that used to be the footer's own background. The footer
+            itself is transparent now, so the bottom wave shows through behind the
+            button instead of being painted over. */}
+        <View style={styles.footerFade} pointerEvents="none" />
         <TouchableOpacity
           activeOpacity={0.85}
           accessibilityRole="button"
@@ -174,6 +188,27 @@ export default function Onboarding() {
           <Text style={styles.ctaLabel}>Get Started →</Text>
         </TouchableOpacity>
       </View>
+    </View>
+  );
+}
+
+/** Soft lavender and mint waves scaled to the screen width, behind all content. */
+function Backdrop({ width }: { width: number }) {
+  return (
+    <View style={styles.backdrop} pointerEvents="none">
+      <Image
+        source={require("../../assets/images/auth-wave-top.png")}
+        style={{ width, height: width / WAVE_TOP_ASPECT_RATIO }}
+        fadeDuration={0}
+      />
+      <Image
+        source={require("../../assets/images/auth-wave-bottom.png")}
+        style={[
+          styles.waveBottom,
+          { width, height: width / WAVE_BOTTOM_ASPECT_RATIO },
+        ]}
+        fadeDuration={0}
+      />
     </View>
   );
 }
@@ -220,13 +255,27 @@ const styles = StyleSheet.create({
     flexBasis: 0,
     alignSelf: "center",
     minHeight: TEAM_IMAGE_MIN_HEIGHT,
+    marginBottom: ART_LIFT,
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFill,
+    overflow: "hidden",
+  },
+  waveBottom: {
+    position: "absolute",
+    bottom: 0,
   },
   footer: {
     // Overlaps the photo so its flat bottom edge fades out above the button.
     marginTop: -TEAM_IMAGE_FADE_HEIGHT,
-    paddingTop: TEAM_IMAGE_FADE_HEIGHT + spacing.xs,
     paddingHorizontal: spacing.xl,
-    backgroundImage: `linear-gradient(180deg, ${colors.ui.surface}00 0px, ${colors.ui.surface} ${TEAM_IMAGE_FADE_HEIGHT}px)`,
+  },
+  footerFade: {
+    // Full-bleed: the artwork is wider than the screen, so its edge is too.
+    marginHorizontal: -spacing.xl,
+    marginBottom: spacing.xs,
+    height: TEAM_IMAGE_FADE_HEIGHT,
+    backgroundImage: `linear-gradient(180deg, ${colors.ui.surface}00 0%, ${colors.ui.surface} 100%)`,
   },
   cta: {
     height: componentTokens.button.height,

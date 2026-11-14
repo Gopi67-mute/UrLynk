@@ -39,6 +39,9 @@ export default function Settings() {
   const leader = useLeaderProfile();
   const { requestSignOut, isSigningOut, signOutFailed } = useSignOut();
   const appVersion = Constants.expoConfig?.version;
+  // The saved UrLynk name, or a placeholder. Never the Google account's name standing in
+  // for it — see `LeaderProfile.isUnavailable`.
+  const nameKnown = !leader.isLoading && !leader.isUnavailable;
 
   function confirmSignOut() {
     Alert.alert("Sign out?", "You will need to sign in again to see your team.", [
@@ -54,7 +57,9 @@ export default function Settings() {
       {/* The UrLynk profile: the preferred name and photo, not the Google account's. */}
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${leader.displayName}. Open your profile`}
+        accessibilityLabel={
+          nameKnown ? `${leader.displayName}. Open your profile` : "Open your profile"
+        }
         accessibilityState={{ disabled: !leader.memberId }}
         disabled={!leader.memberId}
         onPress={() => leader.memberId && openMember(leader.memberId)}
@@ -62,14 +67,14 @@ export default function Settings() {
       >
         <Avatar
           size={60}
-          initials={leader.initials}
+          initials={nameKnown ? leader.initials : ""}
           imageUri={leader.photoUri}
           ringColor={colors.interaction.primaryLight}
         />
         <View style={styles.profileText}>
           {/* The saved preferred name, or a placeholder — never the account name,
               which would flash before it on every cold start. */}
-          {leader.isLoading ? (
+          {!nameKnown ? (
             <View style={styles.profileNameLoading}>
               <Skeleton width="60%" height={20} />
             </View>

@@ -17,9 +17,11 @@ import { Button } from "@/components/button";
 import { ErrorState } from "@/components/error-state";
 import { Icon } from "@/components/icon";
 import { PlacementBadge } from "@/components/member-card";
+import { OfflineWriteBlock } from "@/components/offline-block";
 import { Skeleton } from "@/components/skeleton";
 import { FieldShell, TextField } from "@/components/text-field";
 import { useCreateMember, useMember } from "@/hooks/use-members";
+import { useIsOnline } from "@/lib/connectivity";
 import { formatIsoDate, initialsFor, toIsoDate } from "@/lib/names";
 import {
   colors,
@@ -84,6 +86,7 @@ export default function AddMember() {
   // The chosen parent, including which of its two positions are already filled.
   const parent = useMember(parentId ?? undefined);
   const insets = useSafeAreaInsets();
+  const isOnline = useIsOnline();
 
   const parentName = parent.data?.name ?? null;
   const takenPositions = {
@@ -174,6 +177,11 @@ export default function AddMember() {
 
   function save() {
     if (createMember.isPending) return;
+    // The button is already disabled offline; this is the backstop, so a submission
+    // cannot slip through on a connection that dropped between render and tap. A
+    // mutation sent now would be paused by TanStack Query and sit pending with nothing
+    // to show for it, which looks exactly like a save that worked.
+    if (!isOnline) return;
 
     setFormError(null);
     const found = validate();
@@ -378,12 +386,20 @@ export default function AddMember() {
       </ScrollView>
 
       <View style={[styles.footer, { paddingBottom: insets.bottom + spacing.md }]}>
+        {/* Registering a member is a structural change to the team, and V1 never queues
+            one: see `OfflineWriteBlock`. */}
+        {isOnline ? null : <OfflineWriteBlock action="Registering a member" />}
         <Button
           label="Save Member"
           icon="check"
           loading={createMember.isPending}
+          disabled={!isOnline}
           onPress={save}
-          accessibilityHint="Adds this member to your team"
+          accessibilityHint={
+            isOnline
+              ? "Adds this member to your team"
+              : "Unavailable without a connection"
+          }
         />
       </View>
 

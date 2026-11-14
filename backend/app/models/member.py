@@ -31,6 +31,27 @@ MI_LIFESTYLE_ID_MAX_LENGTH = 32
 MI_LIFESTYLE_ID_LENGTH = 10
 MI_LIFESTYLE_ID_PATTERN = f"^[0-9]{{{MI_LIFESTYLE_ID_LENGTH}}}$"
 
+
+def is_valid_mi_lifestyle_id(value: str | None) -> bool:
+    """Whether this identifier satisfies the rules the database enforces.
+
+    The same rule as `ck_members_mi_lifestyle_id_is_ten_digits`, expressed in Python so
+    it can be checked *before* a write rather than discovered as a constraint violation
+    afterwards. Both the request schema and the placement service read it from here, so
+    there is one definition of a valid identifier rather than three.
+
+    `str.isdigit()` is deliberately not used: it accepts Unicode digits such as
+    Arabic-Indic or superscript numerals, which are not what an identifier is made of.
+    The check is against ASCII 0-9 only, and the value is never parsed as a number, so a
+    leading zero is part of the identifier rather than something to be dropped.
+    """
+    if value is None:
+        return False
+    return len(value) == MI_LIFESTYLE_ID_LENGTH and all(
+        character in "0123456789" for character in value
+    )
+
+
 MEMBER_NAME_MAX_LENGTH = 120
 PHONE_NUMBER_MAX_LENGTH = 32
 NOTES_MAX_LENGTH = 500
@@ -131,10 +152,21 @@ class Member(TimestampMixin, Base):
         ),
         # A parent fills each side at most once. NULLs are distinct in PostgreSQL, so
         # root members (both columns NULL) do not collide here.
+        #
+        # Deferrable, but INITIALLY IMMEDIATE: by default it is still checked the moment
+        # a row is written, which is what makes registering a member into an occupied
+        # slot an immediate 409. Safe deletion is the one operation that asks for the
+        # check to be deferred (see `app/services/placement_service.py`), because
+        # promoting a child into the deleted member's position is a swap and no ordering
+        # of the statements satisfies the rule at every intermediate step. The deferred
+        # check still runs before that transaction commits, so no committed state can
+        # ever hold two members in the same slot. See migration 0006.
         UniqueConstraint(
             "placement_parent_id",
             "placement_position",
             name="uq_members_placement_parent_id_placement_position",
+            deferrable=True,
+            initially="IMMEDIATE",
         ),
         # Exactly one root per team, and the leader holds at most one root member.
         Index("ix_members_team_root", "team_id", unique=True, postgresql_where=text("is_root")),

@@ -1,16 +1,21 @@
+import { useEffect } from "react";
 import { Image, Pressable, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import type { MemberSummary } from "@/api/members";
 import { Avatar } from "@/components/avatar";
+import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
+import { FreshnessNotice } from "@/components/freshness-notice";
 import { Icon, type IconName } from "@/components/icon";
+import { EmptyFace, MemberFace } from "@/components/member-face";
 import { SectionHeader, SectionLink } from "@/components/section-header";
 import { Skeleton } from "@/components/skeleton";
 import { StatTile } from "@/components/stat-tile";
 import { TabScreen } from "@/components/tab-screen";
+import { branchView } from "@/features/team/branch-view";
 import { useLeaderProfile } from "@/hooks/use-leader-profile";
 import { useMemberChildren } from "@/hooks/use-members";
+import { useScreenStatus } from "@/hooks/use-screen-state";
 import { useTeamOverview } from "@/hooks/use-team";
-import { initialsFor } from "@/lib/names";
 import {
   openAddMember,
   openMember,
@@ -18,7 +23,9 @@ import {
   openSettings,
   openTeam,
 } from "@/lib/navigation";
-import { slotState, type SlotState } from "@/lib/slot-state";
+import { worseOf } from "@/lib/screen-state";
+import { slotStateFor, type SlotState } from "@/lib/slot-state";
+import { startupTrace } from "@/lib/startup-trace";
 import {
   colors,
   componentTokens,
@@ -50,15 +57,36 @@ const LOGO_WIDTH = 100;
  */
 export default function Home() {
   const leader = useLeaderProfile();
+  // The leader's own name, or nothing at all: never the Google account's name standing
+  // in for the saved one. See `LeaderProfile.isUnavailable`.
+  const nameKnown = !leader.isLoading && !leader.isUnavailable;
   const overview = useTeamOverview();
   const rootId = overview.data?.root_member.id;
   const children = useMemberChildren(rootId);
 
   const counts = overview.data?.counts ?? null;
-  // The branch cards depend on both requests: the overview supplies the root, and the
-  // children request supplies who holds each position.
-  const branchPending = overview.isPending || children.isPending;
-  const branchError = overview.error ?? children.error;
+  // What the dashboard is honestly doing right now, and how old what it shows is. The
+  // branch cards depend on both requests — the overview supplies the root and the
+  // counts, the children request supplies who holds each position — so their state is
+  // the worse of the two.
+  const team = useScreenStatus(overview);
+  const slots = useScreenStatus(children);
+  const branchState = worseOf(team.state, slots.state);
+
+  // The three numbers this milestone is measured against: when the dashboard first
+  // exists at all, when its counts are on screen, and when the branch cards are.
+  // `startupTrace.mark` keeps the first occurrence, so a later refresh cannot move them.
+  useEffect(() => {
+    startupTrace.mark("home:mounted");
+  }, []);
+
+  useEffect(() => {
+    if (counts) startupTrace.mark("home:counts");
+  }, [counts]);
+
+  useEffect(() => {
+    if (children.data) startupTrace.mark("home:branches");
+  }, [children.data]);
 
   function refresh() {
     void overview.refetch();
@@ -67,6 +95,11 @@ export default function Home() {
 
   return (
     <TabScreen refreshing={overview.isRefetching || children.isRefetching} onRefresh={refresh}>
+      {/* One quiet line, only when there is something to say: cached numbers are
+          genuinely useful, and replacing them with an error card would be both
+          unhelpful and untrue. A background refresh says nothing at all. */}
+      <FreshnessNotice state={branchState} updatedAt={team.updatedAt} />
+
       <View style={styles.header}>
         <Image
           source={require("../../../assets/images/logoAlone.png")}
@@ -106,7 +139,7 @@ export default function Home() {
           {/* The same photo as the welcome card below: one canonical value, read once. */}
           <Avatar
             size={40}
-            initials={leader.initials}
+            initials={nameKnown ? leader.initials : ""}
             imageUri={leader.photoUri}
             ringColor={colors.interaction.primaryLight}
           />
@@ -115,7 +148,7 @@ export default function Home() {
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${leader.displayName}, Team Leader`}
+        accessibilityLabel={nameKnown ? `${leader.displayName}, Team Leader` : "Your profile"}
         accessibilityHint="Opens your profile"
         accessibilityState={{ disabled: !leader.memberId }}
         disabled={!leader.memberId}
@@ -128,14 +161,19 @@ export default function Home() {
           color={`${colors.neutral.white}33`}
           style={styles.leaderCardArt}
         />
-        <Avatar size={64} initials={leader.initials} imageUri={leader.photoUri} />
+        <Avatar
+          size={64}
+          initials={nameKnown ? leader.initials : ""}
+          imageUri={leader.photoUri}
+        />
         <View style={styles.leaderText}>
           <Text maxFontSizeMultiplier={1.2} style={styles.welcome}>
             Welcome back,
           </Text>
           {/* A placeholder, not the account name: showing that would flash the Google
-              name before the saved preferred one on every cold start. */}
-          {leader.isLoading ? (
+              name before the saved preferred one on every cold start, and would leave it
+              standing there for a whole session that never reached the server. */}
+          {!nameKnown ? (
             <View style={styles.leaderNameLoading}>
               <Skeleton width="70%" height={20} />
             </View>
@@ -158,29 +196,41 @@ export default function Home() {
 
       <View style={styles.statsBlock}>
         <View style={styles.statsRow}>
+          {/* Cached counts render immediately; the skeleton is only for a leader who
+              has never loaded them on this device. A background refresh leaves the
+              numbers in place rather than blanking them. */}
           <StatTile
             label="Total Members"
             value={counts?.total_members ?? null}
-            loading={overview.isPending}
+            loading={team.state === "first-load"}
             accent={colors.interaction.primary}
             tint={colors.interaction.primaryLight}
           />
           <StatTile
             label="Left Team"
             value={counts?.left_members ?? null}
-            loading={overview.isPending}
+            loading={team.state === "first-load"}
             accent={placementStyle.LEFT.accent}
             tint={placementStyle.LEFT.tint}
           />
           <StatTile
             label="Right Team"
             value={counts?.right_members ?? null}
-            loading={overview.isPending}
+            loading={team.state === "first-load"}
             accent={placementStyle.RIGHT.accent}
             tint={placementStyle.RIGHT.tint}
           />
         </View>
-        {overview.isError ? (
+        {team.state === "offline-empty" ? (
+          /* Offline with nothing saved on this device. Not an error — there is simply
+             nothing to show yet, and saying "we couldn't load your team numbers" would
+             blame the app for a missing connection. */
+          <EmptyState
+            icon="wifi_off"
+            title="Your team isn't on this device yet"
+            message="Connect to the internet once and your dashboard will be here the next time you open UrLynk, with or without a connection."
+          />
+        ) : team.state === "failed" ? (
           <ErrorState
             error={overview.error}
             title="We couldn't load your team numbers"
@@ -207,15 +257,15 @@ export default function Home() {
           <BranchCard
             side="LEFT"
             member={children.data?.left ?? null}
-            size={counts?.left_members ?? null}
-            state={slotState(branchPending, branchError, children.data?.left)}
+            sideTotal={counts?.left_members ?? null}
+            state={slotStateFor(branchState, children.data?.left)}
             rootId={rootId}
           />
           <BranchCard
             side="RIGHT"
             member={children.data?.right ?? null}
-            size={counts?.right_members ?? null}
-            state={slotState(branchPending, branchError, children.data?.right)}
+            sideTotal={counts?.right_members ?? null}
+            state={slotStateFor(branchState, children.data?.right)}
             rootId={rootId}
           />
         </View>
@@ -259,38 +309,43 @@ export default function Home() {
 
 /**
  * One side of the team, as the dashboard shows it: who holds the position, how many
- * members sit under it, and a way in.
+ * members sit below them, and a way in.
+ *
+ * What it says comes from `branchView`, which the Team screen uses too, so the two
+ * cannot disagree about the same position. The count is the branch at every depth, from
+ * the overview's recursive database count, minus the member named on the card.
  *
  * The card's content is tappable in its own right — a filled position opens that
- * member, an open one opens Add Member with the parent and side already chosen. A
- * position whose state could not be loaded stays disabled and says so: drawing it as
- * open would invite a placement into a slot that may already be taken.
+ * member, where the branch continues below them; an open one opens Add Member with the
+ * parent and side already chosen. A position whose state could not be loaded stays
+ * disabled and says so: drawing it as open would invite a placement into a slot that
+ * may already be taken.
  */
 function BranchCard({
   side,
   member,
-  size,
+  sideTotal,
   state,
   rootId,
 }: {
   side: PlacementSide;
   member: MemberSummary | null;
-  size: number | null;
+  sideTotal: number | null;
   state: SlotState;
   rootId: string | undefined;
 }) {
-  const { label, title, accent, tint } = placementStyle[side];
+  const { accent, tint } = placementStyle[side];
+  const view = branchView({ side, member, sideTotal, state, rootId });
   const loading = state === "loading";
   const unavailable = state === "unavailable";
-  const open = state === "open";
-  // An open position needs the root to place under; without it there is nothing to do.
-  const interactive = !loading && !unavailable && (member !== null || Boolean(rootId));
+  const interactive = view.action.kind !== "none";
 
   function enter() {
-    if (member) {
-      openMember(member.id);
-    } else if (rootId) {
-      openAddMember(rootId, side);
+    const action = view.action;
+    if (action.kind === "member") {
+      openMember(action.memberId);
+    } else if (action.kind === "add") {
+      openAddMember(action.parentId, action.position);
     }
   }
 
@@ -308,22 +363,8 @@ function BranchCard({
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={
-          loading
-            ? `${label} position, loading`
-            : unavailable
-              ? `${label} position, not available`
-              : member
-                ? `${label} position: ${member.name}`
-                : `${label} position is open`
-        }
-        accessibilityHint={
-          interactive
-            ? member
-              ? "Opens this member's details"
-              : "Opens Add Member for this position"
-            : undefined
-        }
+        accessibilityLabel={view.accessibilityLabel}
+        accessibilityHint={interactive ? view.accessibilityHint : undefined}
         accessibilityState={{ disabled: !interactive }}
         disabled={!interactive}
         onPress={enter}
@@ -331,7 +372,7 @@ function BranchCard({
       >
         <View style={[styles.branchPill, { backgroundColor: accent }]}>
           <Text allowFontScaling={false} style={styles.branchPillLabel}>
-            {label}
+            {view.label}
           </Text>
         </View>
 
@@ -341,42 +382,25 @@ function BranchCard({
             <Skeleton width="80%" height={14} />
             <Skeleton width="55%" height={12} />
           </View>
-        ) : unavailable ? (
-          <>
-            <View style={[styles.branchAvatar, styles.branchAvatarEmpty]}>
-              <Icon name="cloud_off" size={20} color={colors.ui.icon} />
-            </View>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchTitle}>
-              Not available
-            </Text>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              Pull to refresh
-            </Text>
-          </>
-        ) : member ? (
-          <>
-            <View style={[styles.branchAvatar, { borderColor: `${accent}55` }]}>
-              <Text allowFontScaling={false} style={[styles.branchInitials, { color: accent }]}>
-                {initialsFor(member.name)}
-              </Text>
-            </View>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchTitle}>
-              {member.name}
-            </Text>
-            <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              {size === null ? title : `${size} ${size === 1 ? "member" : "members"}`}
-            </Text>
-          </>
         ) : (
           <>
-            <View style={[styles.branchAvatar, styles.branchAvatarEmpty]}>
-              <Icon name="person_add" size={22} color={accent} />
-            </View>
+            {unavailable ? (
+              <EmptyFace size={40}>
+                <Icon name="cloud_off" size={20} color={colors.ui.icon} />
+              </EmptyFace>
+            ) : member ? (
+              /* The member's own photograph, with their initials as the fallback. */
+              <MemberFace member={member} size={40} side={side} />
+            ) : (
+              <EmptyFace size={40}>
+                <Icon name="person_add" size={22} color={accent} />
+              </EmptyFace>
+            )}
             <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchTitle}>
-              Open position
+              {view.title}
             </Text>
             <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.branchMeta}>
-              No member yet
+              {view.meta}
             </Text>
           </>
         )}
@@ -385,14 +409,18 @@ function BranchCard({
       <TouchableOpacity
         activeOpacity={0.85}
         accessibilityRole="button"
-        accessibilityLabel={open ? `Add a member to the ${label} position` : `Explore ${title}`}
-        accessibilityState={{ disabled: loading || unavailable }}
-        disabled={loading || unavailable}
-        onPress={() => (open && rootId ? openAddMember(rootId, side) : openTeam())}
+        accessibilityLabel={
+          view.action.kind === "add"
+            ? `Add a member to the ${view.label} position`
+            : view.actionLabel
+        }
+        accessibilityState={{ disabled: !interactive }}
+        disabled={!interactive}
+        onPress={enter}
         style={[
           styles.branchButton,
           { backgroundColor: unavailable ? colors.ui.disabledBackground : accent },
-          (loading || unavailable) && styles.unavailable,
+          !interactive && styles.unavailable,
         ]}
       >
         <Text
@@ -401,10 +429,16 @@ function BranchCard({
           maxFontSizeMultiplier={1.2}
           style={[styles.branchButtonLabel, unavailable && styles.branchButtonLabelDisabled]}
         >
-          {unavailable ? "Unavailable" : open ? "Add Member" : "Explore Team"}
+          {view.actionLabel}
         </Text>
         <Icon
-          name={unavailable ? "cloud_off" : open ? "person_add" : "arrow_forward"}
+          name={
+            unavailable
+              ? "cloud_off"
+              : view.action.kind === "add"
+                ? "person_add"
+                : "arrow_forward"
+          }
           size={18}
           color={unavailable ? colors.ui.disabledForeground : colors.neutral.white}
         />
@@ -585,23 +619,6 @@ const styles = StyleSheet.create({
     alignSelf: "stretch",
     gap: spacing.sm,
     paddingVertical: spacing.xs,
-  },
-  branchAvatar: {
-    width: 40,
-    height: 40,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderRadius: radius.pill,
-    backgroundColor: colors.neutral.white,
-  },
-  branchAvatarEmpty: {
-    borderStyle: "dashed",
-    borderColor: colors.ui.borderStrong,
-  },
-  branchInitials: {
-    fontFamily: fontFamily.bold,
-    fontSize: 14,
   },
   branchPill: {
     paddingHorizontal: spacing.base,

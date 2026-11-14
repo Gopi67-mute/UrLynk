@@ -10,6 +10,7 @@ from app.models.member import (
     NOTES_MAX_LENGTH,
     PHONE_NUMBER_MAX_LENGTH,
     PlacementPosition,
+    is_valid_mi_lifestyle_id,
 )
 from app.models.member_photo import MAX_PHOTO_BYTES
 from app.schemas.common import RequestModel, ResponseModel
@@ -74,9 +75,9 @@ class _MemberProfileFields(RequestModel):
     def _check_mi_lifestyle_id(cls, value: str | None) -> str | None:
         """Exactly ten digits, kept as text.
 
-        `str.isdigit()` is deliberately not used: it accepts Unicode digits such as
-        Arabic-Indic or superscript numerals, which are not what an ID is made of. The
-        check is against ASCII 0-9 only.
+        The rule itself lives in `app.models.member.is_valid_mi_lifestyle_id`, beside
+        the constraint that enforces it, so this schema and the placement service cannot
+        drift apart on what a usable identifier is.
 
         The value is never parsed as a number, so leading zeros survive the round trip
         intact — "0012345678" is stored and returned exactly as given.
@@ -84,9 +85,7 @@ class _MemberProfileFields(RequestModel):
         if value is None:
             return None
         _reject_control_characters(value, "The Mi Lifestyle ID")
-        if len(value) != MI_LIFESTYLE_ID_LENGTH or not all(
-            character in "0123456789" for character in value
-        ):
+        if not is_valid_mi_lifestyle_id(value):
             raise ValueError(
                 f"The Mi Lifestyle ID must be exactly {MI_LIFESTYLE_ID_LENGTH} digits."
             )
@@ -227,6 +226,48 @@ class MemberDetail(MemberSummary):
     sponsor: MemberSummary | None
     has_left_child: bool
     has_right_child: bool
+
+
+class MemberSearchResult(MemberSummary):
+    """One match, with just enough context to recognise the right person.
+
+    The placement parent is named because two members can share a name, and "LEFT under
+    Ajay" is what tells them apart. Nothing else is added: a search result is a way to
+    reach a member, not a copy of their record, so phone numbers and notes stay on the
+    member's own screen.
+    """
+
+    placement_parent_id: uuid.UUID | None
+    placement_parent_name: str | None
+
+
+class MemberSearchPage(ResponseModel):
+    """One bounded page of search results, ordered by name."""
+
+    items: list[MemberSearchResult]
+    # Pass back as `cursor` with the same `q` for the next page; null on the last one.
+    next_cursor: str | None = Field(default=None)
+
+
+class MemberPlacementPath(ResponseModel):
+    """The exact chain of placements from the team's root down to one member.
+
+    `steps` is root first and the requested member last, so reading it top to bottom is
+    reading the way down to them. Each step is an ordinary `MemberSummary`, and its
+    `placement_position` is the side that member occupies under the step before it —
+    which makes the root's null position correct rather than missing, since nobody is
+    above it.
+
+    The chain is calculated in PostgreSQL from the real `placement_parent_id` edges. It
+    is never inferred from registration order, timestamps or identifiers, so it is the
+    team's actual structure at the moment it was asked for.
+    """
+
+    member: MemberSummary
+    steps: list[MemberSummary]
+    # Placement edges between the root and the member: `len(steps) - 1`, and 0 for the
+    # root itself. Stated rather than left to the client to count.
+    depth: int
 
 
 class MemberChildren(ResponseModel):

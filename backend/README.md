@@ -42,9 +42,13 @@ transaction; a repository owns the SQL and always filters by `team_id`.
 | GET    | `/api/v1/members`                    | Bearer | One bounded, keyset-paginated page of the caller's team.       |
 | POST   | `/api/v1/members`                    | Bearer | Register a member in a free LEFT or RIGHT slot.                |
 | GET    | `/api/v1/members/recent`             | Bearer | The newest registrations, newest first. Bounded; excludes the root. |
+| GET    | `/api/v1/members/search`             | Bearer | Find members by name or Mi Lifestyle ID. Bounded and paged.    |
 | GET    | `/api/v1/members/{id}`               | Bearer | One member, with its parent, sponsor and slot availability.    |
+| GET    | `/api/v1/members/{id}/placement-path`| Bearer | The exact root-to-member chain, with each LEFT/RIGHT step.     |
 | PATCH  | `/api/v1/members/{id}`               | Bearer | Partial edit of a member's own details. Nothing structural.    |
 | GET    | `/api/v1/members/{id}/children`      | Bearer | That member's two direct positions. `null` means free.         |
+| GET    | `/api/v1/members/{id}/deletion-plan` | Bearer | Read-only preview of a reorganizing deletion. Writes nothing.  |
+| POST   | `/api/v1/members/{id}/deletion`      | Bearer | Reorganize and delete, in one transaction. Needs a plan token. |
 | GET    | `/api/v1/members/{id}/photo`         | Bearer | The member's profile photo as a data URI.                      |
 | PUT    | `/api/v1/members/{id}/photo`         | Bearer | Set or replace the photo (base64, ≤ 64 KB, JPEG/PNG/WebP).     |
 | DELETE | `/api/v1/members/{id}/photo`         | Bearer | Remove the photo. Removing a missing one is not an error.      |
@@ -59,7 +63,7 @@ ordinary profile edit can never move a member, change their side, make them a le
 reach another team. Placement changes are a separate operation, in a later phase.
 
 The leader's own record is the root member, so the same endpoint maintains their
-preferred name, photo, Mi Lifestyle ID, qualifications and priorities. It is
+preferred name, photo and Mi Lifestyle ID. It is
 independent of Clerk: `POST /api/v1/auth/initialize` never renames an existing root
 member, so a later sign-in cannot put the Google account's name back over a saved one.
 
@@ -83,9 +87,95 @@ Codes a client is expected to act on:
 | `photo_too_large`         | 422    | Over the 64 KB limit. Resize before uploading.               |
 | `placement_occupied`      | 409    | That LEFT/RIGHT slot is taken. Nothing was overwritten.      |
 | `mi_lifestyle_id_taken`   | 409    | Another member of this team already has that ID.             |
-| `placement_chain_invalid` | 409    | The parent's chain does not reach the root; the branch needs attention. |
+| `placement_chain_invalid` | 409    | The chain does not reach the root; the branch needs attention. Raised when placing a member under such a parent, and when a placement path is asked for. |
+| `member_has_children`     | 409    | Use the deletion-plan route; a plain `DELETE` never reorganizes.  |
+| `root_member_undeletable` | 409    | The leader's own record. Never deletable, by either route.    |
+| `member_sponsors_others`  | 409    | Another record names them as sponsor. Change that sponsor first. |
+| `invalid_promotion_choice`| 422    | `promote_member_id` is not one of this member's direct children, or is missing when they have children. |
+| `reorganization_preview_stale` | 409 | The team changed since the preview. Nothing was written; fetch the plan again. |
+| `reorganization_conflict` | 409    | The result would not have been a sound tree. The whole transaction rolled back. |
 | `invalid_cursor`          | 400    | The pagination cursor was not one this API issued.           |
+| `search_query_required`   | 422    | The search query was blank. Nothing was searched for.        |
+| `placement_path_too_deep` | 409    | The chain is longer than 1,000 steps and is not returned.    |
 | `validation_error`        | 422    | Field-level problems, listed in `error.details`.             |
+
+## Deleting a member who has a branch below them
+
+`DELETE /api/v1/members/{id}` removes one member and never more, so it refuses anyone
+with people placed below them (`member_has_children`). Removing such a member without
+losing anybody is a separate, two-request operation:
+
+1. `GET /api/v1/members/{id}/deletion-plan[?promote=<child id>]` — what would happen.
+   Read-only: no row is written, no position is reserved, and no record is kept that it
+   was asked for. With two children, `requires_promotion_choice` is true until `promote`
+   names one of them.
+2. `POST /api/v1/members/{id}/deletion` with `{"promote_member_id": ..., "plan_token": ...}`
+   — carry it out.
+
+What the operation does: the promoted child takes the deleted member's placement parent
+and side, keeping their own children exactly where they are. The other child, with
+everyone below them, is reattached at the first free position under the promoted member,
+found **breadth-first, LEFT before RIGHT** — the shallowest such position, and the
+leftmost at that depth. Every surviving member keeps their ID, their details, their
+photo, their sponsor and their own branch; exactly one member is removed and exactly one
+parent-child relationship is created.
+
+The destination is never accepted from a client. It is recalculated inside the
+transaction that applies it. `plan_token` is a fingerprint of the structural facts of
+the plan: the server rebuilds the plan under lock, fingerprints it again and compares,
+so a confirmation of a plan the tree has outgrown is refused
+(`reorganization_preview_stale`) rather than applied to something the leader never saw.
+Editing a member's name or phone number does not invalidate a plan, because it does not
+change what the operation would do.
+
+Locking: every operation that changes the shape of a tree — registering a member,
+deleting one, and this — first takes the team's structural lock (a `FOR UPDATE` on the
+team's own row), then the member rows it will write. One lock per team, always in that
+order, so two structural changes in a team are serialized without any possibility of a
+deadlock, and different teams never wait for each other. Locking only the target member
+would not be enough: a registration under *any* member of the searched subtree could
+otherwise fill the destination between the search and the write.
+
+Promoting a child into the deleted member's position is a swap, and no ordering of the
+individual statements satisfies every rule at every step. The slot constraint is
+therefore `DEFERRABLE INITIALLY IMMEDIATE` (migration 0006) and this one operation
+defers it, re-arming it before the invariants are checked so that a duplicate slot is a
+handled conflict rather than an error out of `COMMIT`. Default behaviour is unchanged
+everywhere else, and every committed state still satisfies the constraint.
+
+## Finding a member, and the path down to them
+
+`GET /api/v1/members/search?q=` matches a **name** anywhere within it and without regard
+to case, and — when the query is made entirely of digits — the **start of a Mi Lifestyle
+ID**. An identifier is exactly ten digits, so typing the first few narrows it down and
+typing all ten finds exactly one member; leading zeros are matched as typed, since the
+column is text and is never parsed as a number. Letters are never matched against
+identifiers, which spares a comparison per row for a hit that cannot exist. `%` and `_`
+are escaped, so they are searched for rather than acting as wildcards.
+
+Results are ordered by `(lower(name), id)`: alphabetical and total, so two identical
+requests return the same order and paging cannot repeat or skip a member. Deliberately
+not relevance-ranked — an order a leader can scan is worth more than one that reshuffles
+as they type. Pages are bounded (default 25, maximum 50) and continued with
+`next_cursor`. A blank query is refused (`search_query_required`) rather than answered
+with the whole team.
+
+**No index was added for it.** `ILIKE '%term%'` is not a prefix, so no B-tree can serve
+it; the alternative is a pg_trgm GIN index, which means an extension and a migration. At
+V1's stated scale the planner filters one team's rows and top-N sorts a bounded page —
+measured at **1.6 ms of database time over a team of 1,001** (`tests/test_performance.py`
+prints the plan and the timings with `-s`). The plan is printed by the test suite so the
+decision can be revisited with evidence if teams grow well past that.
+
+`GET /api/v1/members/{id}/placement-path` returns the exact chain from the team's root
+down to one member: `steps` root first, the member last, and each step's
+`placement_position` is the side it occupies under the step before it (the root has
+none). It is one recursive walk up the real `placement_parent_id` edges plus one read for
+the members on it — never a request per ancestor, and never a download of the tree. The
+walk carries its path, so a cycle stops it: a chain that does not reach the root is
+refused (`placement_chain_invalid`) rather than returned as a partial path, and one
+longer than 1,000 steps is refused (`placement_path_too_deep`). Measured at **110 ms for
+a 400-step leg**.
 
 ## Team and member rules
 
@@ -95,7 +185,10 @@ a service cannot corrupt a team's structure:
 - **One team per leader** — `teams.owner_user_id` is unique.
 - **One root per team** — partial unique index `members (team_id) WHERE is_root`.
 - **The root has no placement; everyone else has both** — `ck_members_root_has_no_placement`.
-- **One LEFT and one RIGHT child per parent** — `uq_members_placement_parent_id_placement_position`.
+- **One LEFT and one RIGHT child per parent** — `uq_members_placement_parent_id_placement_position`
+  (`DEFERRABLE INITIALLY IMMEDIATE` since migration 0006, so the default is still an
+  immediate check; only the reorganizing deletion defers it, and only within its own
+  transaction).
 - **No self-parenting or self-sponsoring** — `ck_members_placement_parent_not_self`, `ck_members_sponsor_not_self`.
 - **Placement parents and sponsors stay inside the team** — composite foreign keys on
   `(team_id, placement_parent_id)` and `(team_id, sponsor_id)` against `(team_id, id)`.
@@ -314,7 +407,13 @@ Every test needs `libpq.dll` on `PATH` (step 1), even those that do not use a da
 | `test_members.py`             | Placement, validation, pagination, counts, persistence.       |
 | `test_member_updates.py`      | PATCH: partial edits, refused fields, duplicates, isolation.  |
 | `test_member_photos.py`       | Photos: round trip, size and format limits, isolation.        |
+| `test_member_schemas.py`      | The request schemas on their own: every field rule.            |
+| `test_member_deletion.py`     | DELETE: eligibility, refusals, photos, isolation.              |
+| `test_member_reorganization.py` | Reorganizing deletion: promotion, reattachment, staleness.   |
+| `test_member_search.py`       | Search: matching, ordering, paging, validation, isolation.    |
+| `test_placement_path.py`      | Placement path: ordering, LEFT/RIGHT edges, cycles, bounds.   |
 | `test_recent_members.py`      | Recently Added: ordering, bounds, the root's exclusion.       |
+| `test_dashboard.py`           | Dashboard: branch counts at every depth, and after every change. |
 | `test_team_isolation.py`      | One leader against another: reads, writes, cursors, switching. |
 | `test_performance.py`         | A team of 1,000 and a 400-deep leg, with timings printed.      |
 

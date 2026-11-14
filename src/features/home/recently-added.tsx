@@ -1,23 +1,20 @@
+import { useEffect } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { RecentMember } from "@/api/members";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import { Icon } from "@/components/icon";
 import { PlacementBadge } from "@/components/member-card";
+import { MemberFace } from "@/components/member-face";
 import { SkeletonCard } from "@/components/skeleton";
 import { SectionHeader } from "@/components/section-header";
 import { useRecentMembers } from "@/hooks/use-members";
-import { formatIsoDate, formatTimestampDate, initialsFor } from "@/lib/names";
+import { useScreenStatus } from "@/hooks/use-screen-state";
+import { formatIsoDate, formatTimestampDate } from "@/lib/names";
 import { openMember } from "@/lib/navigation";
-import {
-  colors,
-  componentTokens,
-  fontFamily,
-  placementStyle,
-  radius,
-  spacing,
-  typography,
-} from "@/theme";
+import { startupTrace } from "@/lib/startup-trace";
+import { colors, componentTokens, fontFamily, radius, spacing, typography } from "@/theme";
+import { sectionStateFor } from "./section-state";
 
 /**
  * The members most recently added to the team.
@@ -32,24 +29,38 @@ import {
  */
 export function RecentlyAdded() {
   const recent = useRecentMembers();
+  // One decision, made in one place and tested on its own: see `sectionStateFor` for
+  // why a failure outranks an empty list, and why "offline" is neither of them.
+  const status = useScreenStatus(recent);
+  const state = sectionStateFor(status.state, recent.data?.length ?? null);
+
+  useEffect(() => {
+    if (recent.data) startupTrace.mark("home:recent");
+  }, [recent.data]);
 
   return (
     <View style={styles.section}>
       <SectionHeader icon="group_add" title="Recently Added" />
 
-      {recent.isPending ? (
+      {state === "loading" ? (
         <View style={styles.list}>
           <SkeletonCard lines={2} />
           <SkeletonCard lines={2} />
         </View>
-      ) : recent.isError ? (
+      ) : state === "error" ? (
         <ErrorState
           error={recent.error}
           title="We couldn't load your recent members"
           onRetry={() => void recent.refetch()}
           isRetrying={recent.isFetching}
         />
-      ) : recent.data.length === 0 ? (
+      ) : state === "offline" ? (
+        <EmptyState
+          icon="wifi_off"
+          title="Not saved on this device yet"
+          message="Your recent members will be here once UrLynk has loaded them with a connection, and will stay readable after that."
+        />
+      ) : state === "empty" ? (
         <EmptyState
           icon="group_add"
           title="No members added yet"
@@ -57,7 +68,7 @@ export function RecentlyAdded() {
         />
       ) : (
         <View style={styles.list}>
-          {recent.data.map((member) => (
+          {(recent.data ?? []).map((member) => (
             <RecentRow key={member.id} member={member} />
           ))}
         </View>
@@ -68,8 +79,6 @@ export function RecentlyAdded() {
 
 function RecentRow({ member }: { member: RecentMember }) {
   const side = member.placement_position;
-  const accent = side ? placementStyle[side].accent : colors.interaction.primary;
-  const tint = side ? placementStyle[side].tint : colors.interaction.primaryLight;
 
   // The day they joined when it was recorded, otherwise the day they were added here.
   // Two different kinds of value: a joining date is a calendar day, while created_at
@@ -90,11 +99,8 @@ function RecentRow({ member }: { member: RecentMember }) {
       onPress={() => openMember(member.id)}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
-      <View style={[styles.avatar, { backgroundColor: tint, borderColor: `${accent}55` }]}>
-        <Text allowFontScaling={false} style={[styles.initials, { color: accent }]}>
-          {initialsFor(member.name)}
-        </Text>
-      </View>
+      {/* Their photograph when they have one, their initials when they do not. */}
+      <MemberFace member={member} size={44} side={side ?? undefined} />
 
       <View style={styles.body}>
         <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.name}>
@@ -136,18 +142,6 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.85,
-  },
-  avatar: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderRadius: radius.pill,
-  },
-  initials: {
-    fontFamily: fontFamily.bold,
-    fontSize: 15,
   },
   body: {
     flex: 1,
