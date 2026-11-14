@@ -1,6 +1,7 @@
 import {
   isClerkAPIResponseError,
   isClerkRuntimeError,
+  useAuth,
   useSignIn,
   useSignUp,
   useSSO,
@@ -22,6 +23,7 @@ const SOCIAL_STRATEGIES = {
 const GENERIC_MESSAGE = "We couldn't continue right now. Please try again.";
 const OFFLINE_MESSAGE =
   "We couldn't reach the server. Check your connection and try again.";
+const NOT_READY_MESSAGE = "Still connecting. Try again in a moment.";
 
 /** Messages for failures the user can fix from the field they just submitted. */
 const FIELD_ERROR_MESSAGES: Record<string, string> = {
@@ -76,12 +78,33 @@ async function attempt(task: () => Promise<AuthResult>): Promise<AuthResult> {
 
 /** The single seam the auth screen uses to talk to Clerk. */
 export function useAuthClient() {
+  const { isLoaded } = useAuth();
   const { signIn } = useSignIn();
   const { signUp } = useSignUp();
   const { startSSOFlow } = useSSO();
 
+  /**
+   * The authentication screen is reachable before Clerk has settled — that is the point
+   * of rendering the public shell without waiting for it (see `startup-gate.ts`) — so
+   * the two actions that can be the *first* thing a user does have to say so rather than
+   * disappear into the SDK.
+   *
+   * Clerk's own behaviour makes this necessary in both directions: an email call made
+   * too early is queued until the SDK loads, which with no connection means a button
+   * that spins and never answers; a social call made too early returns a result with no
+   * session and no error, which would read as a tap that did nothing. The other actions
+   * are reachable only after a code has been sent, which cannot happen before the SDK
+   * is loaded, so they need no guard.
+   */
+  function notReady(): AuthFailure | null {
+    return isLoaded ? null : failure(NOT_READY_MESSAGE);
+  }
+
   function sendEmailCode(mode: AuthMode, emailAddress: string) {
     return attempt(async () => {
+      const waiting = notReady();
+      if (waiting) return waiting;
+
       if (mode === "signIn") {
         return toResult(await signIn.emailCode.sendCode({ emailAddress }));
       }
@@ -137,6 +160,9 @@ export function useAuthClient() {
   /** Closing the browser is not a failure, so it resolves as a quiet success. */
   function continueWithSocial(provider: SocialProvider) {
     return attempt(async () => {
+      const waiting = notReady();
+      if (waiting) return waiting;
+
       const { createdSessionId, setActive, authSessionResult } =
         await startSSOFlow({ strategy: SOCIAL_STRATEGIES[provider] });
 

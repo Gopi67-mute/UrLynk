@@ -13,18 +13,26 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.models import Member, PlacementPosition, Team
-from app.repositories import member_repository
+from app.repositories import member_repository, team_repository
 from app.schemas.member import (
     MemberChildren,
     MemberCreate,
     MemberDetail,
     MemberListItem,
     MemberPage,
+    MemberPlacementPath,
+    MemberSearchPage,
+    MemberSearchResult,
     MemberSummary,
     MemberUpdate,
     RecentMember,
 )
-from app.services.pagination import decode_cursor, encode_cursor
+from app.services.pagination import (
+    decode_cursor,
+    decode_name_cursor,
+    encode_cursor,
+    encode_name_cursor,
+)
 
 logger = logging.getLogger("app.members")
 
@@ -38,8 +46,8 @@ ROOT_UNDELETABLE = (
 )
 HAS_CHILDREN = (
     "member_has_children",
-    "This member has members placed below them. Those positions would be lost, so they "
-    "can't be deleted.",
+    "This member has members placed below them, so they can't be removed on their own. "
+    "Review the reorganization first and then confirm.",
 )
 SPONSORS_OTHERS = (
     "member_sponsors_others",
@@ -93,6 +101,22 @@ MI_LIFESTYLE_ID_REQUIRED = (
     "A Mi Lifestyle ID is required for every member.",
 )
 
+# How far a placement path is followed before the answer becomes "this is not a path we
+# will draw". A V1 team is expected to hold on the order of a thousand members, so even a
+# team placed as one unbroken chain fits inside this; anything beyond it is a structure
+# no screen could usefully render, and saying so is better than returning thousands of
+# rows. The repository's own cycle protection is separate and catches damage directly.
+MAX_PLACEMENT_PATH_STEPS = 1_000
+
+PLACEMENT_CHAIN_INVALID = (
+    "placement_chain_invalid",
+    "That part of your team structure needs attention before its path can be shown.",
+)
+PLACEMENT_PATH_TOO_DEEP = (
+    "placement_path_too_deep",
+    "This member sits further below you than UrLynk can show in one path.",
+)
+
 
 def _not_found(code_and_message: tuple[str, str]) -> ApiError:
     code, message = code_and_message
@@ -140,19 +164,26 @@ def create_member(session: Session, team: Team, data: MemberCreate) -> MemberDet
 
     The order matters, and every step runs inside one transaction:
 
-    1. the placement parent is read **and locked** inside the caller's team, so two
+    1. the team's structural lock is taken first, before any member row, because this
+       is one of the operations that changes the shape of the tree. It is what stops a
+       registration landing in a position that a reorganizing deletion is at that
+       moment searching for (see `team_repository.lock_structure`), and taking it first
+       everywhere is what keeps the lock order consistent;
+    2. the placement parent is read **and locked** inside the caller's team, so two
        members racing for the same slot are serialized rather than both succeeding;
-    2. the parent's own chain is verified to reach the team's root, so nothing is
+    3. the parent's own chain is verified to reach the team's root, so nothing is
        added to a damaged or cyclic branch;
-    3. the sponsor, if given, is checked to be in the same team;
-    4. the target slot is checked for an occupant;
-    5. the insert still has to satisfy every constraint, and a loser in a race gets
-       the same 409 as step 4 would have produced.
+    4. the sponsor, if given, is checked to be in the same team;
+    5. the target slot is checked for an occupant;
+    6. the insert still has to satisfy every constraint, and a loser in a race gets
+       the same 409 as step 5 would have produced.
 
     Self-parenting cannot be requested here: the member does not exist yet, and the
     `ck_members_placement_parent_not_self` constraint refuses it at the database level
     for any later update.
     """
+    team_repository.lock_structure(session, team.id)
+
     parent = member_repository.get_for_update(session, team.id, data.placement_parent_id)
     if parent is None:
         raise _not_found(PARENT_NOT_FOUND)
@@ -271,25 +302,34 @@ def delete_member(session: Session, team: Team, member_id: uuid.UUID) -> None:
     Deliberately narrow: this removes a single leaf, and nothing else. It is never a
     way to prune a branch, move anyone, or empty a team.
 
+    A member with anyone below them is refused here rather than reorganized. Removing
+    them without losing their branch is a different operation, with its own preview and
+    its own confirmation: `placement_service.delete_with_reorganization`. This one is
+    never a way to reach it — the refusal stands whatever the request looks like.
+
     Everything happens in one transaction, and the order matters:
 
-    1. the member is read **and locked** inside the caller's team, so a member of any
+    1. the team's structural lock is taken first, before any member row, the same way
+       every operation that changes the tree takes it;
+    2. the member is read **and locked** inside the caller's team, so a member of any
        other team reads as 404 and two concurrent deletions are serialized;
-    2. the root member is refused — it is the leader's own record, created with the
+    3. the root member is refused — it is the leader's own record, created with the
        team, and the team's structure hangs from it;
-    3. a member with anyone placed below them is refused, so no descendant is ever
+    4. a member with anyone placed below them is refused, so no descendant is ever
        cascade-deleted out from under the leader;
-    4. a member another record names as sponsor is refused, because sponsorship is an
+    5. a member another record names as sponsor is refused, because sponsorship is an
        independent relationship the database will not let us silently discard.
 
-    The lock in step 1 is the same row `create_member` takes on a placement parent, so
-    a registration racing this deletion is serialized against it rather than slipping a
-    child in between the check and the delete. If one somehow did, the placement foreign
-    key (NO ACTION, not CASCADE) still refuses the delete and the race ends in a 409.
+    The locks in steps 1 and 2 are the ones `create_member` takes, so a registration
+    racing this deletion is serialized against it rather than slipping a child in
+    between the check and the delete. If one somehow did, the placement foreign key
+    (NO ACTION, not CASCADE) still refuses the delete and the race ends in a 409.
 
     The member's photo row goes with them: `member_photos` cascades from
     `members (team_id, id)` on purpose, since a photo has no meaning without its member.
     """
+    team_repository.lock_structure(session, team.id)
+
     member = member_repository.get_for_update(session, team.id, member_id)
     if member is None:
         raise _not_found(MEMBER_NOT_FOUND)
@@ -336,6 +376,107 @@ def list_recent_members(session: Session, team: Team, *, limit: int) -> list[Rec
         )
         for member in members
     ]
+
+
+def search_members(
+    session: Session, team: Team, *, query: str, limit: int, cursor: str | None = None
+) -> MemberSearchPage:
+    """Find members of the caller's own team by name or Mi Lifestyle ID.
+
+    The team comes from the verified token, never from the request, so a query is only
+    ever run against the caller's own members: another leader's team cannot be searched,
+    and a member of one cannot be discovered by guessing at a name or an identifier.
+
+    Blank input is refused rather than answered: an empty query matches everyone, and
+    returning the whole team under the heading of a search would be a different feature
+    wearing this one's name. The app does not send one — it waits for something to search
+    for — so this is the backstop.
+
+    Two queries, whatever the page size: one for the matches, one for the placement
+    parents they name. The whole team is never loaded, and the page is bounded by `limit`
+    before anything is read.
+    """
+    term = query.strip()
+    if not term:
+        raise ApiError(
+            422, "search_query_required", "Type a name or Mi Lifestyle ID to search for."
+        )
+
+    after = decode_name_cursor(cursor) if cursor else None
+    # One extra row answers "is there another page?" without a second count query.
+    rows = member_repository.search(session, team.id, query=term, limit=limit + 1, after=after)
+
+    has_more = len(rows) > limit
+    page = rows[:limit]
+
+    parent_ids = {member.placement_parent_id for member in page if member.placement_parent_id}
+    parents = member_repository.get_many(session, team.id, sorted(parent_ids))
+
+    items = [
+        MemberSearchResult(
+            **_summary(member).model_dump(),
+            placement_parent_id=member.placement_parent_id,
+            placement_parent_name=(
+                parents[member.placement_parent_id].name
+                if member.placement_parent_id in parents
+                else None
+            ),
+        )
+        for member in page
+    ]
+    next_cursor = (
+        encode_name_cursor(page[-1].name.lower(), page[-1].id) if has_more and page else None
+    )
+
+    # The number of matches only: what a leader searched for is their own business, and
+    # the term itself is never written to a log.
+    logger.info("Member search returned %d result(s)", len(items))
+    return MemberSearchPage(items=items, next_cursor=next_cursor)
+
+
+def get_placement_path(session: Session, team: Team, member_id: uuid.UUID) -> MemberPlacementPath:
+    """The exact way down from the team's root to this member.
+
+    Calculated in PostgreSQL, from the real placement edges, in two bounded queries: one
+    recursive walk up the `placement_parent_id` chain for the ids, and one read for the
+    members themselves. Neither the whole tree nor one request per ancestor.
+
+    A member of another team is a 404, exactly as everywhere else. A chain that does not
+    reach the root — a cycle, or a parent that is missing — is refused rather than drawn:
+    a partial path presented as a complete one would be a lie about where someone sits.
+    """
+    member = member_repository.get(session, team.id, member_id)
+    if member is None:
+        raise _not_found(MEMBER_NOT_FOUND)
+
+    path = member_repository.ancestor_path(
+        session, team.id, member_id, max_depth=MAX_PLACEMENT_PATH_STEPS
+    )
+
+    if path.exhausted:
+        logger.warning(
+            "Placement path exceeds %d steps (team=%s)", MAX_PLACEMENT_PATH_STEPS, team.id
+        )
+        raise ApiError(409, *PLACEMENT_PATH_TOO_DEEP)
+
+    if path.has_cycle or not path.reaches_root:
+        logger.error(
+            "Refusing to show a placement path whose chain is broken "
+            "(cycle=%s, reaches_root=%s, team=%s)",
+            path.has_cycle,
+            path.reaches_root,
+            team.id,
+        )
+        raise ApiError(409, *PLACEMENT_CHAIN_INVALID)
+
+    members = member_repository.get_many(session, team.id, path.member_ids)
+    if any(step_id not in members for step_id in path.member_ids):
+        # Only reachable if a member left the team between the two queries.
+        logger.error("Placement path references a member that is no longer in the team")
+        raise ApiError(409, *PLACEMENT_CHAIN_INVALID)
+
+    steps = [_summary(members[step_id]) for step_id in path.member_ids]
+    return MemberPlacementPath(member=_summary(member), steps=steps, depth=len(steps) - 1)
 
 
 def _detail(session: Session, team: Team, member: Member) -> MemberDetail:

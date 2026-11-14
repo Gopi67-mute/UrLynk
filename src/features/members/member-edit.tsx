@@ -20,9 +20,11 @@ import { Button } from "@/components/button";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import { Icon, type IconName } from "@/components/icon";
+import { OfflineWriteBlock } from "@/components/offline-block";
 import { Skeleton } from "@/components/skeleton";
 import { FieldShell, TextField } from "@/components/text-field";
 import { useMember, useMemberPhoto, useSaveMemberPhoto, useUpdateMember } from "@/hooks/use-members";
+import { useIsOnline } from "@/lib/connectivity";
 import { formatIsoDate, initialsFor, toIsoDate } from "@/lib/names";
 import { pickProfilePhoto } from "@/lib/profile-photo";
 import {
@@ -130,6 +132,7 @@ function EditForm({ member }: { member: MemberDetail }) {
   const savePhoto = useSaveMemberPhoto(member.id);
   const storedPhoto = useMemberPhoto(member.id, member.photo_updated_at);
   const insets = useSafeAreaInsets();
+  const isOnline = useIsOnline();
 
   const isLeader = member.is_root;
   const isSaving = update.isPending || savePhoto.isPending;
@@ -250,6 +253,9 @@ function EditForm({ member }: { member: MemberDetail }) {
 
   function save() {
     if (isSaving) return;
+    // The backstop behind the disabled button, for a connection that dropped between
+    // the render and the tap. See `OfflineWriteBlock`.
+    if (!isOnline) return;
 
     setFormError(null);
     const found = validate();
@@ -447,14 +453,19 @@ function EditForm({ member }: { member: MemberDetail }) {
       </ScrollView>
 
       <View style={[styles.footer, { paddingBottom: insets.bottom + spacing.md }]}>
+        {isOnline ? null : <OfflineWriteBlock action="Saving a profile" />}
         <Button
           label="Save Changes"
           icon="check"
           loading={isSaving}
-          disabled={!dirty}
+          disabled={!dirty || !isOnline}
           onPress={save}
           accessibilityHint={
-            dirty ? "Saves your edits" : "Nothing has changed yet"
+            !isOnline
+              ? "Unavailable without a connection"
+              : dirty
+                ? "Saves your edits"
+                : "Nothing has changed yet"
           }
         />
         <Button

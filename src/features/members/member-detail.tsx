@@ -15,13 +15,23 @@ import { isApiError } from "@/api/client";
 import type { MemberDetail as Member, MemberSummary, PlacementPosition } from "@/api/members";
 import { Avatar } from "@/components/avatar";
 import { Button } from "@/components/button";
+import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
+import { FreshnessNotice } from "@/components/freshness-notice";
 import { Icon, type IconName } from "@/components/icon";
 import { MemberCard, PlacementBadge } from "@/components/member-card";
 import { Skeleton, SkeletonCard } from "@/components/skeleton";
+import { deletionFailureMessage } from "@/features/members/deletion-plan";
 import { useDeleteMember, useMember, useMemberChildren, useMemberPhoto } from "@/hooks/use-members";
+import { useScreenStatus } from "@/hooks/use-screen-state";
 import { formatIsoDate, initialsFor } from "@/lib/names";
-import { openAddMember, openEditProfile, openMember } from "@/lib/navigation";
+import {
+  openAddMember,
+  openDeleteMember,
+  openEditProfile,
+  openMember,
+  openPlacementPath,
+} from "@/lib/navigation";
 import {
   colors,
   componentTokens,
@@ -35,28 +45,12 @@ import {
 
 const NOT_RECORDED = "Not recorded";
 
-/**
- * Why a deletion was refused, said in the terms of this screen.
- *
- * The client's generic status messages are wrong here: a refusal is a 409, and "this
- * changed in the meantime, refresh and try again" would invite the user to retry
- * something that will never succeed until they change the team first. Each of these is
- * a stable code the backend documents, so the message can name the real reason.
- */
-const DELETE_FAILURE_MESSAGES: Record<string, string> = {
-  member_has_children:
-    "This member has members placed below them. Move or remove those members first.",
-  member_sponsors_others:
-    "This member is recorded as another member's sponsor. Change that sponsor first.",
-  root_member_undeletable: "This is your own record as team leader, so it can't be deleted.",
-  member_not_found: "This member is no longer in your team.",
-};
-
 /** One member: who they are, where they sit, and the two positions below them. */
 export default function MemberDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const member = useMember(id);
   const children = useMemberChildren(id);
+  const status = useScreenStatus(member);
 
   function refresh() {
     void member.refetch();
@@ -78,16 +72,11 @@ export default function MemberDetailScreen() {
           />
         }
       >
-        {member.isPending ? (
-          <LoadingMember />
-        ) : member.isError ? (
-          <ErrorState
-            error={member.error}
-            title="We couldn't load this member"
-            onRetry={refresh}
-            isRetrying={member.isFetching}
-          />
-        ) : (
+        {/* A member opened before is drawn from the device straight away, with the
+            notice above saying when their details were last confirmed. */}
+        <FreshnessNotice state={status.state} updatedAt={status.updatedAt} />
+
+        {member.data ? (
           <LoadedMember
             member={member.data}
             left={children.data?.left ?? null}
@@ -96,6 +85,21 @@ export default function MemberDetailScreen() {
             childrenError={children.isError ? children.error : null}
             onRetryChildren={() => void children.refetch()}
           />
+        ) : status.state === "offline-empty" ? (
+          <EmptyState
+            icon="wifi_off"
+            title="This member isn't on this device"
+            message="You haven't opened them with a connection yet, so there's nothing saved to show. Members you have opened stay readable offline."
+          />
+        ) : status.state === "failed" ? (
+          <ErrorState
+            error={member.error}
+            title="We couldn't load this member"
+            onRetry={refresh}
+            isRetrying={member.isFetching}
+          />
+        ) : (
+          <LoadingMember />
         )}
       </ScrollView>
     </View>
@@ -175,6 +179,22 @@ function LoadedMember({
       </Card>
 
       <Card icon="account_tree" title="Placement">
+        {/* The exact chain from the leader down to this member, calculated by the
+            backend from the real placement relationships. Offered for the leader's own
+            record too, where it is a path of one step and says so. */}
+        <Button
+          label="View Placement Path"
+          icon="account_tree"
+          variant="secondary"
+          compact
+          onPress={() => openPlacementPath(member.id)}
+          accessibilityHint={
+            member.is_root
+              ? "Shows your own position at the top of the team"
+              : "Shows every LEFT and RIGHT step from you down to this member"
+          }
+        />
+
         {member.is_root ? (
           <Text maxFontSizeMultiplier={1.3} style={styles.rootNote}>
             This is your own record at the root of the team, so it has no placement
@@ -256,21 +276,37 @@ function LoadedMember({
 /**
  * Permanently remove this member, once the user has said so explicitly.
  *
- * The confirmation names the member and says plainly that it cannot be undone, so the
- * destructive action is never one stray tap away. While the request is in flight the
- * control is disabled, which is what stops a second deletion being sent.
+ * Which of two routes depends on whether anyone is placed below them, which this
+ * screen already knows from the member's own record:
  *
- * On success the screen is left behind — it describes a member who no longer exists —
- * and the account's queries are invalidated by the mutation, so Home, Team, the counts
- * and Recently Added all refresh without this screen arranging it.
+ * - nobody below: the deletion is self-contained, so it is confirmed here in a dialog
+ *   that names the member and says plainly that it cannot be undone. While the request
+ *   is in flight the control is disabled, which is what stops a second deletion being
+ *   sent. On success the screen is left behind — it describes a member who no longer
+ *   exists — and the mutation invalidates the account's queries, so Home, Team, the
+ *   counts and Recently Added all refresh without this screen arranging it.
+ *
+ * - someone below: a dialog is the wrong place for it. The leader has a choice to make
+ *   and a plan to read, so the Delete Member screen takes over, and the backend
+ *   calculates what would happen before anything is confirmed.
+ *
+ * The flags come from the member's record rather than from a guess, and the backend
+ * decides regardless: an ordinary delete of a member with children is refused, which
+ * the message below explains if the two ever disagree.
  */
 function DeleteMember({ member }: { member: Member }) {
+  const hasMembersBelow = member.has_left_child || member.has_right_child;
   const remove = useDeleteMember(member.id);
   const [failure, setFailure] = useState<string | null>(null);
 
   function confirm() {
     if (remove.isPending) return;
     setFailure(null);
+
+    if (hasMembersBelow) {
+      openDeleteMember(member.id);
+      return;
+    }
 
     Alert.alert(
       "Delete this member?",
@@ -296,9 +332,7 @@ function DeleteMember({ member }: { member: Member }) {
         }
         // A refusal this screen knows about reads as its real reason; anything else
         // falls back to the client's own message for that status.
-        setFailure(
-          (error.code && DELETE_FAILURE_MESSAGES[error.code]) || error.userMessage,
-        );
+        setFailure(deletionFailureMessage(error.code, error.userMessage));
       },
     });
   }
@@ -309,7 +343,11 @@ function DeleteMember({ member }: { member: Member }) {
         activeOpacity={0.85}
         accessibilityRole="button"
         accessibilityLabel={`Delete ${member.name}`}
-        accessibilityHint="Asks you to confirm before permanently deleting this member"
+        accessibilityHint={
+          hasMembersBelow
+            ? "Shows how your team would be reorganized before you confirm"
+            : "Asks you to confirm before permanently deleting this member"
+        }
         accessibilityState={{ busy: remove.isPending, disabled: remove.isPending }}
         disabled={remove.isPending}
         onPress={confirm}
@@ -328,8 +366,10 @@ function DeleteMember({ member }: { member: Member }) {
       </TouchableOpacity>
 
       <Text maxFontSizeMultiplier={1.3} style={styles.deleteNote}>
-        Permanently removes this member from your team. A member with anyone placed below
-        them can&apos;t be deleted.
+        {hasMembersBelow
+          ? "This member has members placed below them. You'll see exactly how your team " +
+            "would be reorganized, and nothing changes until you confirm."
+          : "Permanently removes this member from your team."}
       </Text>
 
       {failure ? (

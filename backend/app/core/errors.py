@@ -13,7 +13,13 @@ logger = logging.getLogger("app.errors")
 
 
 class ApiError(Exception):
-    """An expected failure with a stable, client-safe code and message."""
+    """An expected failure with a stable, client-safe code and message.
+
+    `details` carries structured facts the client needs to say something specific —
+    which member is blocking an operation, for instance — so an app can compose its own
+    sentence instead of either showing a generic message or displaying server text
+    verbatim. Only put client-safe values in it: it is sent to the caller as-is.
+    """
 
     def __init__(
         self,
@@ -21,12 +27,14 @@ class ApiError(Exception):
         code: str,
         message: str,
         headers: dict[str, str] | None = None,
+        details: Any = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.headers = headers
+        self.details = details
 
 
 _STATUS_CODES = {
@@ -66,7 +74,14 @@ def error_response(
 
 
 async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
-    return error_response(request, exc.status_code, exc.code, exc.message, headers=exc.headers)
+    return error_response(
+        request,
+        exc.status_code,
+        exc.code,
+        exc.message,
+        details=exc.details,
+        headers=exc.headers,
+    )
 
 
 async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:

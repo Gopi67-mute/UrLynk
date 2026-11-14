@@ -36,6 +36,28 @@ export function openAddMember(parentId?: string, position?: PlacementSide) {
   });
 }
 
+/**
+ * The reorganize-and-delete flow for a member who has people placed below them.
+ *
+ * A screen of its own rather than a dialog: the leader has a choice to make and a plan
+ * to read, and both have to survive a glance away from the phone. Opening it writes
+ * nothing — backing out leaves the team exactly as it was.
+ */
+export function openDeleteMember(memberId: string) {
+  router.push({ pathname: "/members/delete", params: { id: memberId } });
+}
+
+/**
+ * The exact chain of placements from the leader at the root down to this member.
+ *
+ * A screen rather than a section on the member's own, because a deep path scrolls and
+ * because it is the one view whose whole subject is the way down to someone. Backing out
+ * returns to the member they came from.
+ */
+export function openPlacementPath(memberId: string) {
+  router.push({ pathname: "/members/path", params: { id: memberId } });
+}
+
 export function openTeam() {
   router.navigate("/team");
 }

@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, func, select, text, tuple_
+from sqlalchemy import Select, func, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,10 @@ from app.models import Member, PlacementPosition
 # Cycles are already caught by the path check in the query below; this is a backstop.
 MAX_PLACEMENT_DEPTH = 10_000
 
+# Named here so `SET CONSTRAINTS` and the error translation that reads constraint names
+# off a failed write cannot drift apart.
+PLACEMENT_SLOT_CONSTRAINT = "uq_members_placement_parent_id_placement_position"
+
 
 @dataclass(frozen=True, slots=True)
 class ChainStatus:
@@ -21,6 +25,32 @@ class ChainStatus:
     reaches_root: bool
     has_cycle: bool
     depth: int
+
+
+@dataclass(frozen=True, slots=True)
+class AncestorPath:
+    """A member's placement chain, root first and the member themselves last.
+
+    `reaches_root` and `has_cycle` describe the same walk `ChainStatus` reports on, so a
+    damaged chain is recognised rather than drawn. `exhausted` means the walk stopped at
+    the depth limit instead of at the root: the chain is not known to be broken, only
+    longer than the caller is willing to return.
+    """
+
+    member_ids: tuple[uuid.UUID, ...]
+    reaches_root: bool
+    has_cycle: bool
+    exhausted: bool
+
+
+def _escape_like(value: str) -> str:
+    """Make a user's text literal inside LIKE/ILIKE.
+
+    Without this, a search for "100%" would match every member, and "_" would stand in
+    for any single character. The backslash is escaped first, so escaping cannot be
+    escaped away. `escape="\\"` must be passed to the comparison for this to take effect.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _team_scoped(team_id: uuid.UUID) -> Select[tuple[Member]]:
@@ -53,6 +83,13 @@ def insert_root_if_absent(
 
     A partial unique index (`members (team_id) WHERE is_root`) allows only one, and
     ON CONFLICT DO NOTHING turns a concurrent duplicate into a no-op.
+
+    The conflict is named rather than left open, for two reasons. It states the one
+    collision this insert expects — a second first-login for the same team — so any
+    *other* unique violation is raised instead of being quietly swallowed. And a bare
+    `ON CONFLICT DO NOTHING` considers every unique constraint on the table as a
+    possible arbiter, which PostgreSQL refuses outright once one of them is deferrable
+    (`uq_members_placement_parent_id_placement_position` is, as of migration 0006).
     """
     session.execute(
         insert(Member)
@@ -64,7 +101,7 @@ def insert_root_if_absent(
             placement_parent_id=None,
             placement_position=None,
         )
-        .on_conflict_do_nothing()
+        .on_conflict_do_nothing(index_elements=["team_id"], index_where=text("is_root"))
     )
 
 
@@ -143,6 +180,76 @@ def delete(session: Session, member: Member) -> None:
     session.delete(member)
 
 
+def child_slots(
+    session: Session, team_id: uuid.UUID, parent_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, dict[PlacementPosition, uuid.UUID]]:
+    """Who sits directly below each of these parents, as identifiers only.
+
+    One query for a whole level of the tree, which is what lets the breadth-first slot
+    search cost one round trip per level rather than one per member. Three columns are
+    selected and no member is loaded into the session: a search that walks hundreds of
+    members never reads a name, a note or a photo.
+    """
+    if not parent_ids:
+        return {}
+
+    rows = session.execute(
+        select(Member.placement_parent_id, Member.placement_position, Member.id).where(
+            Member.team_id == team_id,
+            Member.placement_parent_id.in_(parent_ids),
+        )
+    ).all()
+
+    slots: dict[uuid.UUID, dict[PlacementPosition, uuid.UUID]] = {}
+    for parent_id, position, child_id in rows:
+        if parent_id is not None and position is not None:
+            slots.setdefault(parent_id, {})[PlacementPosition(position)] = child_id
+    return slots
+
+
+def has_duplicate_slots(session: Session, team_id: uuid.UUID) -> bool:
+    """Whether any parent in this team holds two members on the same side.
+
+    The unique constraint already makes this impossible, and reorganization re-arms it
+    before committing. Asking anyway is deliberate: it is the one invariant whose breach
+    would silently lose a member from the tree, and it costs a single grouped query.
+    """
+    duplicate = session.execute(
+        select(Member.placement_parent_id)
+        .where(Member.team_id == team_id, Member.placement_parent_id.is_not(None))
+        .group_by(Member.placement_parent_id, Member.placement_position)
+        .having(func.count() > 1)
+        .limit(1)
+    ).first()
+    return duplicate is not None
+
+
+def defer_slot_checks(session: Session) -> None:
+    """Hold the placement-slot check until this transaction commits.
+
+    Only reorganization asks for this, and only because promoting a child into the
+    deleted member's position is a swap: the promoted member has to take a slot its
+    previous occupant has not released yet. See migration 0006 for why no ordering of
+    the statements avoids it.
+
+    The constraint is DEFERRABLE INITIALLY IMMEDIATE, so this changes nothing for any
+    other transaction, and a database that has not run migration 0006 raises here rather
+    than quietly skipping the protection.
+    """
+    session.execute(text(f'SET CONSTRAINTS "{PLACEMENT_SLOT_CONSTRAINT}" DEFERRED'))
+
+
+def enforce_slot_checks(session: Session) -> None:
+    """Check the deferred placement-slot rule now, before the transaction commits.
+
+    Re-arming the constraint runs every check that was queued while it was deferred, so
+    a duplicated slot is raised here — inside the operation, where it becomes a handled
+    conflict and a rollback — instead of out of COMMIT, where there is nothing left to
+    catch it.
+    """
+    session.execute(text(f'SET CONSTRAINTS "{PLACEMENT_SLOT_CONSTRAINT}" IMMEDIATE'))
+
+
 def filled_slots(
     session: Session, team_id: uuid.UUID, member_ids: Sequence[uuid.UUID]
 ) -> dict[uuid.UUID, set[PlacementPosition]]:
@@ -213,6 +320,61 @@ def list_page(
     return list(session.scalars(stmt.order_by(Member.created_at, Member.id).limit(limit)).all())
 
 
+def search(
+    session: Session,
+    team_id: uuid.UUID,
+    *,
+    query: str,
+    limit: int,
+    after: tuple[str, uuid.UUID] | None = None,
+) -> list[Member]:
+    """Members of one team whose name or Mi Lifestyle ID matches `query`.
+
+    Two different kinds of match, because the two fields are two different kinds of
+    value:
+
+    - **name**: anywhere in the name, case-insensitively, so "nair" finds "Meera Nair".
+      ILIKE is PostgreSQL's own case-insensitive comparison, so no column is wrapped in
+      `lower()` for the match itself;
+    - **Mi Lifestyle ID**: a *prefix*, and only when the query is made of digits. An
+      identifier is exactly ten digits, so a leader typing the first few of one is
+      narrowing it down; typing letters is never a search for an identifier, and
+      scanning the column for those would cost a comparison per row for no possible hit.
+      A full identifier is a prefix of itself, so an exact search still finds it — and
+      leading zeros are matched as typed, since the column is text and is never parsed as
+      a number.
+
+    The two conditions are OR'd in one statement, so a member matching both appears once.
+
+    Ordering is `(lower(name), id)`: alphabetical, case-insensitive, and total — `id`
+    breaks ties between members who share a name, so the order is identical on every
+    request and a member can never appear on two pages or be skipped between them.
+    Deliberately *not* relevance-ranked: a stable order a leader can scan is worth more
+    here than a cleverer one that reshuffles as they type.
+
+    `after` is the previous page's last `(lower(name), id)`, compared as a row so the
+    database can walk from that position. Both the comparison and the ordering use the
+    same collation, so they agree.
+
+    Everything is bounded: the caller's `limit` caps the rows, the statement is filtered
+    by `team_id` first, and no member outside the caller's team can be reached whatever
+    the query says.
+    """
+    pattern = _escape_like(query)
+    conditions = [Member.name.ilike(f"%{pattern}%", escape="\\")]
+
+    # Only when the query could be part of an identifier. `str.isdigit` is avoided for
+    # the reason `is_valid_mi_lifestyle_id` avoids it: it accepts Unicode numerals.
+    if query and all(character in "0123456789" for character in query):
+        conditions.append(Member.mi_lifestyle_id.ilike(f"{pattern}%", escape="\\"))
+
+    sort_name = func.lower(Member.name)
+    stmt = _team_scoped(team_id).where(or_(*conditions))
+    if after is not None:
+        stmt = stmt.where(tuple_(sort_name, Member.id) > after)
+    return list(session.scalars(stmt.order_by(sort_name, Member.id).limit(limit)).all())
+
+
 # Walks a member's placement parents upwards, carrying the path so a cycle stops the
 # recursion instead of looping forever.
 _ANCESTOR_CHAIN_SQL = text(
@@ -256,6 +418,69 @@ def ancestor_chain_status(
     return ChainStatus(reaches_root=row.reaches_root, has_cycle=row.has_cycle, depth=row.depth)
 
 
+# The same upward walk as `_ANCESTOR_CHAIN_SQL`, but keeping each step rather than only
+# the verdict. `depth` counts placement edges from the member, so ordering by it
+# descending puts the root first and the member last — the order the path is read in.
+_ANCESTOR_PATH_SQL = text(
+    """
+    WITH RECURSIVE chain AS (
+        SELECT id, placement_parent_id, is_root, ARRAY[id] AS path,
+               false AS cycle, 0 AS depth
+        FROM members
+        WHERE team_id = :team_id AND id = :member_id
+        UNION ALL
+        SELECT parent.id, parent.placement_parent_id, parent.is_root,
+               chain.path || parent.id, parent.id = ANY(chain.path), chain.depth + 1
+        FROM members AS parent
+        JOIN chain ON parent.id = chain.placement_parent_id
+        WHERE parent.team_id = :team_id
+          AND NOT chain.cycle
+          AND NOT chain.is_root
+          AND chain.depth < :max_depth
+    )
+    SELECT id, is_root, cycle, depth FROM chain ORDER BY depth DESC
+    """
+)
+
+
+def ancestor_path(
+    session: Session, team_id: uuid.UUID, member_id: uuid.UUID, *, max_depth: int
+) -> AncestorPath:
+    """The exact placement chain from the team's root down to this member.
+
+    One query, whatever the depth: the database walks the real `placement_parent_id`
+    edges, so the result is the structure itself rather than anything inferred from
+    registration order, timestamps or identifiers. Nothing but the ids is selected, so a
+    deep path costs no names, notes or photos here; the caller loads the members it needs
+    in a second, bounded query.
+
+    Three things stop the walk, and the result says which: the root (`reaches_root`), a
+    member already on the path (`has_cycle` — a damaged tree, not a longer one), and
+    `max_depth` (`exhausted`). A chain that reaches neither the root nor the limit means
+    the member's parent is missing from the team, which is also damage.
+
+    `member_ids` is root-first and always ends with `member_id`; for the root itself it
+    holds that one id.
+    """
+    rows = session.execute(
+        _ANCESTOR_PATH_SQL,
+        {"team_id": team_id, "member_id": member_id, "max_depth": max_depth},
+    ).all()
+
+    if not rows:
+        return AncestorPath((), reaches_root=False, has_cycle=False, exhausted=False)
+
+    top = rows[0]
+    return AncestorPath(
+        member_ids=tuple(row.id for row in rows),
+        reaches_root=bool(top.is_root),
+        has_cycle=any(row.cycle for row in rows),
+        # The walk is given `max_depth` edges to use, so a chain still going at that
+        # depth is longer than the caller asked for rather than broken.
+        exhausted=not top.is_root and top.depth >= max_depth,
+    )
+
+
 # Counts each side of the root in one pass. UNION (not UNION ALL) de-duplicates, which
 # also means a damaged tree cannot make this recurse forever.
 _BRANCH_COUNTS_SQL = text(
@@ -284,3 +509,29 @@ def branch_sizes(
     for side, size in rows:
         sizes[PlacementPosition(side)] = size
     return sizes
+
+
+# Counts a member and everyone below them. UNION (not UNION ALL) de-duplicates, so a
+# damaged tree cannot make this recurse forever.
+_SUBTREE_SIZE_SQL = text(
+    """
+    WITH RECURSIVE subtree AS (
+        SELECT id FROM members WHERE team_id = :team_id AND id = :member_id
+        UNION
+        SELECT descendant.id
+        FROM members AS descendant
+        JOIN subtree ON descendant.placement_parent_id = subtree.id
+        WHERE descendant.team_id = :team_id
+    )
+    SELECT count(*) FROM subtree
+    """
+)
+
+
+def subtree_size(session: Session, team_id: uuid.UUID, member_id: uuid.UUID) -> int:
+    """How many members move if this member moves: themselves and every descendant.
+
+    Counted in the database, so the preview can say "12 members move with them" without
+    the API loading twelve members to find out.
+    """
+    return session.scalar(_SUBTREE_SIZE_SQL, {"team_id": team_id, "member_id": member_id}) or 0

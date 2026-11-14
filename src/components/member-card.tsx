@@ -1,7 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { MemberSummary } from "@/api/members";
 import { Icon } from "@/components/icon";
-import { initialsFor } from "@/lib/names";
+import { MemberFace } from "@/components/member-face";
 import {
   colors,
   componentTokens,
@@ -53,8 +53,6 @@ export function MemberCard({
   showBadge?: boolean;
   trailing?: React.ReactNode;
 }) {
-  const accent = side ? placementStyle[side].accent : colors.interaction.primary;
-  const tint = side ? placementStyle[side].tint : colors.interaction.primaryLight;
   const position = member.placement_position;
 
   return (
@@ -65,11 +63,8 @@ export function MemberCard({
       onPress={onPress}
       style={({ pressed }) => [styles.card, pressed && onPress && styles.pressed]}
     >
-      <View style={[styles.avatar, { backgroundColor: tint, borderColor: `${accent}55` }]}>
-        <Text allowFontScaling={false} style={[styles.avatarText, { color: accent }]}>
-          {initialsFor(member.name)}
-        </Text>
-      </View>
+      {/* The member's photograph when they have one, their initials when they do not. */}
+      <MemberFace member={member} size={44} side={side} />
 
       <View style={styles.body}>
         <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={styles.name}>
@@ -101,18 +96,6 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.85,
-  },
-  avatar: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderRadius: radius.pill,
-  },
-  avatarText: {
-    fontFamily: fontFamily.bold,
-    fontSize: 15,
   },
   body: {
     flex: 1,
